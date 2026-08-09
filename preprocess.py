@@ -375,6 +375,29 @@ def to_model_input(pixels: np.ndarray) -> np.ndarray:
     return np.repeat(x[:, None, :, :], 3, axis=1)
 
 
+def series_coverage(
+    study_uids: Iterable[str],
+    series_df: pd.DataFrame,
+    plane_prefs: Sequence[str],
+    max_series: int,
+) -> tuple[int, int]:
+    """(studies with >=1 resolvable series, total studies) — no DICOM decode.
+
+    Cheap early-warning check: if this comes back near 0/N, every downstream
+    prediction will collapse to a near-constant, input-independent output
+    (all-zero pixels in, same logits out for every study), which reads as
+    "the model isn't learning" when the real bug is series selection or a
+    wrong image root.
+    """
+    uids = list(study_uids)
+    hits = 0
+    for uid in uids:
+        study_series = series_df[series_df["StudyInstanceUID"].astype(str) == str(uid)]
+        if select_series(study_series, plane_prefs=plane_prefs, max_series=max_series):
+            hits += 1
+    return hits, len(uids)
+
+
 def iter_study_uids(series_df: pd.DataFrame) -> Iterable[str]:
     seen: set[str] = set()
     for uid in series_df["StudyInstanceUID"].astype(str):

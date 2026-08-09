@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader
 from config import ID_COLUMN, PreprocessConfig, RunConfig, TARGET_COLUMNS
 from data import StudyDataset, build_targets, load_tables
 from model import build_model, masked_bce_with_logits
+from preprocess import series_coverage
 from textlabel import coverage_report, label_reports
 
 
@@ -122,6 +123,15 @@ def train(
     pre = PreprocessConfig(
         n_slices=n_slices, size=size, max_series=max_series
     )
+
+    # Cheap, decode-free sanity check: if this ratio is low, series selection
+    # (or the assumed <root>/<study>/<series>/ layout) doesn't match this
+    # dataset, and every downstream metric will be meaningless zero-input noise.
+    train_hits, train_n = series_coverage(train_uids, tables.series, pre.plane_prefs, pre.max_series)
+    val_hits, val_n = series_coverage(val_uids, tables.series, pre.plane_prefs, pre.max_series)
+    print(f"series resolved: train {train_hits}/{train_n} | val {val_hits}/{val_n}")
+    if val_n and val_hits < val_n:
+        print(f"WARNING: {val_n - val_hits} val studies have no matching series -> zero-filled input")
     train_ds = StudyDataset(train_uids, tables.series, pre, targets, mask)
     val_ds = StudyDataset(val_uids, tables.series, pre, targets, mask)
     train_loader = DataLoader(
@@ -156,6 +166,15 @@ def train(
     macro_auc = float("nan")
     if val_uids:
         probs, uids = predict(model, val_loader, device)
+        pred_std = float(probs.std())
+        print(f"val prediction std across studies/columns: {pred_std:.5f}")
+        if pred_std < 1e-3:
+            print(
+                "WARNING: predictions are (near-)identical across every validation "
+                "study - AUC will read as ~0.5 everywhere regardless of label quality. "
+                "Check the 'series resolved' line above and n_train_studies/epochs "
+                "before trusting these numbers."
+            )
         yt = targets.loc[uids, columns].to_numpy(dtype=float)
         mk = mask.loc[uids, columns].to_numpy(dtype=bool)
         auc_table = per_column_auc(np.nan_to_num(yt), probs, mk, columns)
