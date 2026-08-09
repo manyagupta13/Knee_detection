@@ -95,11 +95,20 @@ def train(
     print(f"labeled cells: {int(mask.to_numpy().sum())} / {mask.size}")
 
     # ---- split: validate on gold only --------------------------------------
-    gold_uids = (
-        [u for u in tables.study_uids if u in set(tables.gold[ID_COLUMN].astype(str))]
-        if tables.gold is not None
-        else []
-    )
+    # "Gold" means at least one non-null label in train.csv, NOT mere presence
+    # of the StudyInstanceUID: some releases of train.csv carry one row per
+    # study with every column NaN except for the ~1.3% that are truly labeled,
+    # and a presence-only check would silently swallow the whole training set
+    # into "validation".
+    gold_uids = []
+    if tables.gold is not None:
+        g = tables.gold.set_index(tables.gold[ID_COLUMN].astype(str))
+        label_cols = [c for c in columns if c in g.columns]
+        really_labeled = set(g.index[g[label_cols].notna().any(axis=1)])
+        gold_uids = [u for u in tables.study_uids if u in really_labeled]
+        print(
+            f"gold table: {len(g)} rows, {len(really_labeled)} with >=1 non-null label"
+        )
     rng = np.random.default_rng(seed)
     gold_shuffled = list(gold_uids)
     rng.shuffle(gold_shuffled)
