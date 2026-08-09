@@ -14,23 +14,20 @@ from typing import Sequence
 # ---------------------------------------------------------------------------
 # Targets
 # ---------------------------------------------------------------------------
-# The 12 findings scored by macro-AUC, in submission order.
-#
-# IMPORTANT: these are placeholder header strings. Before the first real Kaggle
-# submission, replace them with the exact header of the competition's
-# sample_submission.csv (or just let target_columns() read that file, which is
-# what the inference notebook does). The order here only matters as a fallback.
+# The 12 findings scored by macro-AUC, in submission order. Verified against the
+# competition's sample_submission.csv header — keep these byte-exact, including
+# the apostrophe in "Baker's" and the spaces.
 TARGET_COLUMNS: tuple[str, ...] = (
     "ACL",
     "MCL",
-    "Meniscus_Medial",
-    "Meniscus_Lateral",
-    "OA_Medial",
-    "OA_Lateral",
-    "OA_Patellofemoral",
+    "Medial Meniscus",
+    "Lateral Meniscus",
+    "Medial OA",
+    "Lateral OA",
+    "PF OA",
     "Effusion",
     "Synovitis",
-    "Bakers_Cyst",
+    "Baker's",
     "Contusion",
     "Fracture",
 )

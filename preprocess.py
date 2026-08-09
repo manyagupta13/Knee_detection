@@ -91,6 +91,56 @@ def classify_plane_from_iop(iop: Sequence[float] | None) -> str:
     return plane if scores[plane] >= 0.5 else "unknown"
 
 
+def _truthy(value) -> bool | None:
+    """Interpret the 0/1 flags in *_series.csv, tolerating strings and NaN."""
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ("", "nan", "none"):
+            return None
+        if v in ("1", "1.0", "true", "yes", "y"):
+            return True
+        if v in ("0", "0.0", "false", "no", "n"):
+            return False
+        return None
+    try:
+        return bool(int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_series_row(row: dict) -> tuple[str, str]:
+    """``(plane, contrast)`` for one row of *_series.csv.
+
+    The competition ships structured metadata — ``Anatomical_Plane``,
+    ``Fluid_Sensitive``, ``Fat_Suppression`` — which is strictly better than
+    parsing SeriesDescription, so it wins whenever present. Description/IOP
+    parsing stays as the fallback for datasets that lack these columns (and for
+    the pure unit tests).
+    """
+    plane = "unknown"
+    raw_plane = row.get("Anatomical_Plane")
+    if raw_plane is not None and not (
+        isinstance(raw_plane, float) and math.isnan(raw_plane)
+    ):
+        text = str(raw_plane).strip().lower()
+        if text in _PLANE_NORMALS:
+            plane = text
+
+    fluid = _truthy(row.get("Fluid_Sensitive"))
+
+    if plane != "unknown" and fluid is not None:
+        return plane, ("fluid" if fluid else "other")
+
+    # Fall back to free-text / geometry for whatever the columns didn't answer.
+    desc_plane, desc_contrast = classify_series(row.get("SeriesDescription"))
+    if plane == "unknown":
+        plane = desc_plane
+    contrast = ("fluid" if fluid else "other") if fluid is not None else desc_contrast
+    return plane, contrast
+
+
 def classify_series(description, iop: Sequence[float] | None = None) -> tuple[str, str]:
     """Return ``(plane, contrast)`` where contrast is 'fluid' or 'other'.
 
@@ -175,7 +225,7 @@ def select_series(
     rows = study_series.sort_values("SeriesInstanceUID", kind="stable").to_dict("records")
     classified = []
     for row in rows:
-        plane, contrast = classify_series(row.get("SeriesDescription"))
+        plane, contrast = classify_series_row(row)
         if plane == "unknown" and row.get("series_dir"):
             plane = classify_plane_from_iop(_peek_iop(row["series_dir"]))
         classified.append((row, plane, contrast))

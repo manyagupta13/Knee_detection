@@ -136,9 +136,13 @@ def test_precision_against_fixture_ground_truth(fixture_dir):
     for uid in gold.index:
         for col in PSEUDO_LABEL_COLUMNS:
             pred = labels.loc[uid, col]
-            if not np.isnan(pred):
-                assert pred == float(gold.loc[uid, col]), (uid, col)
-                checked += 1
+            truth = float(gold.loc[uid, col])
+            # train.csv now has a row per study; most carry no gold label at all,
+            # and there is nothing to check those pseudo-labels against.
+            if np.isnan(pred) or np.isnan(truth):
+                continue
+            assert pred == truth, (uid, col)
+            checked += 1
     assert checked > 0
 
 

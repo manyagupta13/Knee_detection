@@ -83,6 +83,66 @@ def test_val_studies_are_gold_and_excluded_from_training(fixture_dir, tmp_path):
     assert metrics["n_train_studies"] <= len(tables.study_uids) - metrics["n_val_gold_studies"]
 
 
+def test_reports_come_from_the_train_csv_report_column(fixture_dir):
+    """Reports are a column of train.csv, not a separate file. When this broke,
+    the pseudo-labeler silently no-opped and training fell back to gold-only."""
+    tables = load_tables(fixture_dir, split="train")
+    assert tables.reports is not None, "no reports loaded -> pseudo-labeler is a no-op"
+    assert "report_text" in tables.reports.columns
+    assert tables.reports["report_text"].notna().all()
+    # ...and the Report column must not leak into the label table.
+    assert "Report" not in tables.gold.columns
+
+
+def test_pseudo_labels_widen_supervision_beyond_gold(fixture_dir):
+    """The entire point of Phase 0: text turns a handful of gold studies into
+    meaningfully more supervised rows."""
+    from textlabel import label_reports
+
+    tables = load_tables(fixture_dir, split="train")
+    pseudo, _ = label_reports(tables.reports)
+    _, gold_mask = build_targets(tables.study_uids, tables.gold, None)
+    _, union_mask = build_targets(tables.study_uids, tables.gold, pseudo)
+
+    gold_studies = int(gold_mask.any(axis=1).sum())
+    union_studies = int(union_mask.any(axis=1).sum())
+    assert union_studies > gold_studies, (gold_studies, union_studies)
+
+
+def test_pixels_actually_load_from_the_series_directory(fixture_dir):
+    """Guards the train_images/ vs train_series/ path bug: a wrong image root
+    yields all-zero inputs and a model that predicts a constant."""
+    from config import PreprocessConfig
+    from data import StudyDataset
+
+    tables = load_tables(fixture_dir, split="train")
+    ds = StudyDataset(tables.study_uids[:4], tables.series, PreprocessConfig(n_slices=2, size=32))
+    for i in range(len(ds)):
+        x = ds[i]["x"]
+        assert float(x.max()) > 0.0, "zero-filled input — image root is wrong"
+
+
+def test_columns_override_is_honoured(fixture_dir, tmp_path):
+    """train() must take the header from its argument, not a stale import-time
+    binding of config.TARGET_COLUMNS."""
+    from train import train
+
+    reordered = list(reversed(TARGET_COLUMNS))
+    metrics = train(
+        data_dir=fixture_dir,
+        out_dir=tmp_path / "cols",
+        epochs=1,
+        n_slices=2,
+        size=32,
+        pretrained=False,
+        device="cpu",
+        columns=reordered,
+    )
+    assert [r["column"] for r in metrics["per_column_auc"]] == reordered
+    saved = RunConfig.load(tmp_path / "cols" / "run_config.json")
+    assert list(saved.target_columns) == reordered
+
+
 def test_preprocess_config_round_trips(tmp_path):
     cfg = PreprocessConfig(n_slices=8, size=128, max_series=3)
     path = tmp_path / "pre.json"

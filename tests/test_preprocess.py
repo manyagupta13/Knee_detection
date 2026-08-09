@@ -13,6 +13,7 @@ from preprocess import (
     _list_dicoms,
     classify_plane_from_iop,
     classify_series,
+    classify_series_row,
     preprocess_series,
     preprocess_study,
     select_series,
@@ -75,7 +76,7 @@ def test_prefers_sagittal_fluid_then_falls_back_to_sagittal_any(tables):
         study = tables.series[tables.series["StudyInstanceUID"] == uid]
         chosen = select_series(study, DEFAULT_PLANE_PREFS, max_series=1)
         assert chosen, uid
-        plane, contrast = classify_series(chosen[0]["SeriesDescription"])
+        plane, contrast = classify_series_row(chosen[0])
         assert plane == "sagittal", (uid, chosen[0]["SeriesDescription"])
         if contrast != "fluid":
             used_fallback += 1

@@ -240,7 +240,7 @@ def make_fixture(out_dir: Path, n_studies: int = 12, seed: int = 0) -> Path:
                     fracture=fracture_present,
                 )
                 _write_dicom(
-                    out_dir / "train_images" / study_uid / series_uid / f"{instance_numbers[k]:04d}.dcm",
+                    out_dir / "train_series" / study_uid / series_uid / f"{instance_numbers[k]:04d}.dcm",
                     px,
                     study_uid,
                     series_uid,
@@ -249,11 +249,14 @@ def make_fixture(out_dir: Path, n_studies: int = 12, seed: int = 0) -> Path:
                     instance_numbers[k],
                     z,
                 )
+            # Real schema: structured plane/contrast flags, no SeriesDescription.
             series_rows.append(
                 {
                     ID_COLUMN: study_uid,
                     "SeriesInstanceUID": series_uid,
-                    "SeriesDescription": series_desc,
+                    "Fluid_Sensitive": int(is_fluid),
+                    "Fat_Suppression": int(is_fluid and "FS" in series_desc.upper()),
+                    "Anatomical_Plane": plane.capitalize(),
                 }
             )
 
@@ -282,8 +285,20 @@ def make_fixture(out_dir: Path, n_studies: int = 12, seed: int = 0) -> Path:
 
     out_dir.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(series_rows).to_csv(out_dir / "train_series.csv", index=False)
-    pd.DataFrame(report_rows).to_csv(out_dir / "train_reports.csv", index=False)
-    pd.DataFrame(gold_rows, columns=[ID_COLUMN, *TARGET_COLUMNS]).to_csv(
+    # train.csv: ONE ROW PER STUDY, carrying the report inline, with the 12 label
+    # columns left NaN for every study that isn't gold. This is the real shape -
+    # a labels-only table would hide the "row present but unlabeled" case that
+    # broke the gold/val split.
+    gold_by_uid = {row[ID_COLUMN]: row for row in gold_rows}
+    train_rows = []
+    for rep in report_rows:
+        uid = rep[ID_COLUMN]
+        row = {ID_COLUMN: uid, "Report": rep["report_text"]}
+        gold = gold_by_uid.get(uid)
+        for col in TARGET_COLUMNS:
+            row[col] = gold[col] if gold is not None else np.nan
+        train_rows.append(row)
+    pd.DataFrame(train_rows, columns=[ID_COLUMN, "Report", *TARGET_COLUMNS]).to_csv(
         out_dir / "train.csv", index=False
     )
 
@@ -292,12 +307,13 @@ def make_fixture(out_dir: Path, n_studies: int = 12, seed: int = 0) -> Path:
     test_series = pd.DataFrame(series_rows)
     test_series = test_series[test_series[ID_COLUMN].isin(test_uids)].copy()
     for _, r in test_series.iterrows():
-        src = out_dir / "train_images" / r[ID_COLUMN] / r["SeriesInstanceUID"]
-        dst = out_dir / "test_images" / r[ID_COLUMN] / r["SeriesInstanceUID"]
+        src = out_dir / "train_series" / r[ID_COLUMN] / r["SeriesInstanceUID"]
+        dst = out_dir / "test_series" / r[ID_COLUMN] / r["SeriesInstanceUID"]
         dst.mkdir(parents=True, exist_ok=True)
         for f in sorted(src.iterdir()):
             dst.joinpath(f.name).write_bytes(f.read_bytes())
     test_series.to_csv(out_dir / "test_series.csv", index=False)
+    pd.DataFrame({ID_COLUMN: test_uids}).to_csv(out_dir / "test.csv", index=False)
 
     sample = pd.DataFrame({ID_COLUMN: test_uids})
     for col in TARGET_COLUMNS:

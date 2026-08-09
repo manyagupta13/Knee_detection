@@ -24,33 +24,52 @@ class Tables:
     study_uids: list[str]
 
 
+REPORT_COLUMN = "Report"
+
+
 def load_tables(data_dir: str | Path, split: str = "train") -> Tables:
     """Load the CSVs for a split.
 
-    Expected layout (mirrors the competition, and what tools/make_fixture.py
-    emits)::
+    Competition layout (which tools/make_fixture.py reproduces)::
 
         data_dir/
-          train.csv              # gold labels, only for labeled studies
-          train_reports.csv      # StudyInstanceUID, report_text  (train only)
-          train_series.csv       # StudyInstanceUID, SeriesInstanceUID, SeriesDescription
-          train_images/<StudyInstanceUID>/<SeriesInstanceUID>/*.dcm
-          test_series.csv, test_images/, sample_submission.csv
+          train.csv          # StudyInstanceUID, Report, + the 12 label columns
+                             #   one row per study; labels are NaN for all but ~58
+          train_series.csv   # StudyInstanceUID, SeriesInstanceUID,
+                             #   Fluid_Sensitive, Fat_Suppression, Anatomical_Plane
+          train_series/<StudyInstanceUID>/<SeriesInstanceUID>/*.dcm
+          test.csv, test_series.csv, test_series/, sample_submission.csv
+
+    Note the pixel directory is ``<split>_series/``, the same stem as the CSV.
+    The reports are a *column of train.csv*, not a separate file, and the test
+    split has none — which is the whole reason text is supervision-only.
     """
     data_dir = Path(data_dir)
     series = pd.read_csv(data_dir / f"{split}_series.csv", dtype=str)
-    series = attach_series_dirs(series, data_dir / f"{split}_images")
+
+    images_root = data_dir / f"{split}_series"
+    if not images_root.is_dir():  # tolerate an <split>_images/ layout
+        alt = data_dir / f"{split}_images"
+        if alt.is_dir():
+            images_root = alt
+    series = attach_series_dirs(series, images_root)
 
     gold = None
-    gold_path = data_dir / f"{split}.csv"
-    if gold_path.exists():
-        gold = pd.read_csv(gold_path)
-        gold[ID_COLUMN] = gold[ID_COLUMN].astype(str)
-
     reports = None
-    reports_path = data_dir / f"{split}_reports.csv"
-    if reports_path.exists():
-        reports = pd.read_csv(reports_path, dtype=str)
+    table_path = data_dir / f"{split}.csv"
+    if table_path.exists():
+        table = pd.read_csv(table_path)
+        table[ID_COLUMN] = table[ID_COLUMN].astype(str)
+
+        if REPORT_COLUMN in table.columns:
+            reports = table[[ID_COLUMN, REPORT_COLUMN]].rename(
+                columns={REPORT_COLUMN: "report_text"}
+            )
+            table = table.drop(columns=[REPORT_COLUMN])
+
+        # test.csv carries only the id column - that is not a label table.
+        if len(table.columns) > 1:
+            gold = table
 
     study_uids = list(dict.fromkeys(series[ID_COLUMN].astype(str)))
     return Tables(series=series, gold=gold, reports=reports, study_uids=study_uids)

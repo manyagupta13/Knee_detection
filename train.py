@@ -21,6 +21,7 @@ import pandas as pd
 import torch
 from torch.utils.data import DataLoader
 
+import config
 from config import ID_COLUMN, PreprocessConfig, RunConfig, TARGET_COLUMNS
 from data import StudyDataset, build_targets, load_tables
 from model import build_model, masked_bce_with_logits
@@ -76,6 +77,7 @@ def train(
     seed: int = 0,
     device: str | None = None,
     num_workers: int = 0,
+    columns: Sequence[str] | None = None,
 ) -> dict:
     t0 = time.time()
     torch.manual_seed(seed)
@@ -85,7 +87,13 @@ def train(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     tables = load_tables(data_dir, split="train")
-    columns = list(TARGET_COLUMNS)
+    # Read from config lazily rather than the import-time binding, so callers can
+    # override the header (e.g. from sample_submission.csv) without the stale
+    # `from config import TARGET_COLUMNS` tuple silently winning.
+    columns = list(columns) if columns is not None else list(config.TARGET_COLUMNS)
+    missing = [c for c in columns if tables.gold is not None and c not in tables.gold.columns]
+    if missing:
+        print(f"WARNING: {len(missing)} target columns absent from train.csv: {missing}")
 
     # ---- labels: gold UNION high-precision pseudo-labels --------------------
     pseudo = None
