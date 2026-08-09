@@ -1,0 +1,14 @@
+# Phase 0. Torch/timm versions are whatever the Kaggle image ships; pinning them
+# here would only fight it. Everything else is stdlib-adjacent.
+numpy
+pandas
+pydicom
+pillow
+scikit-learn
+torch
+timm
+# tests only
+pytest
+nbformat
+nbclient
+ipykernel
