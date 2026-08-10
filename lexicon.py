@@ -296,3 +296,98 @@ FINDING_SPECS: tuple[FindingSpec, ...] = (
 )
 
 SPEC_BY_COLUMN: dict[str, FindingSpec] = {s.column: s for s in FINDING_SPECS}
+
+
+# ---------------------------------------------------------------------------
+# Osteoarthritis: compartment attribution
+# ---------------------------------------------------------------------------
+# The OA columns need different machinery from everything else, because real
+# reports are SECTIONED:
+#
+#     PATELLOFEMORAL COMPARTMENT:
+#     Patellofemoral compartment cartilage:
+#     High-grade cartilage loss along the medial patellar facet.
+#
+# The compartment is a header and the finding is two lines below it, so no
+# amount of clause-local matching connects them. Compartment is therefore
+# tracked as parser state, and a finding is attributed to the compartment named
+# in its own sentence if there is one, otherwise to the enclosing section.
+OA_COLUMN_BY_COMPARTMENT: dict[str, str] = {
+    "medial": "Medial OA",
+    "lateral": "Lateral OA",
+    "pf": "PF OA",
+}
+
+# Order matters: "medial patellar facet" is PATELLOFEMORAL, not medial
+# compartment, so the patellar patterns must be tested before medial/lateral.
+COMPARTMENT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "pf",
+        (
+            r"\bpatellofemoral\w*\b", r"\bfemoropatelar\w*\b", r"\bfemoropatellair\w*\b",
+            r"\bfemoropatellar\w*\b", r"\bretropatellar\w*\b",
+            r"\bpatellar facet\b", r"\bpatella\w* facet\b", r"\bfacet of the patella\b",
+            r"\btrochlea\w*\b", r"\bpatellar cartilage\b", r"\bcartilago rotulian\w*\b",
+            r"\bcartilago patelar\w*\b", r"\brotulian\w*\b", r"\bpatelar\w*\b",
+            # \w* so the Latin genitive "patellae" (chondromalacia patellae)
+            # and "patellar" both match.
+            r"\bkniescheibe\w*\b", r"\bpatella\w*\b", r"\bpatellaire\b",
+        ),
+    ),
+    (
+        "medial",
+        (
+            r"\bmedial compartment\b", r"\bmedial femorotibial\w*\b",
+            r"\bmedial femoral condyl\w*\b", r"\bmedial tibial plateau\b",
+            r"\bcompartimento medial\b", r"\bcompartimento femorotibial interno\b",
+            r"\bcondilo femoral medial\b", r"\bplatillo tibial medial\b",
+            r"\bmedial kompartman\w*\b", r"\bic kompartman\w*\b",
+            r"\bmedialer? femurkondyl\w*\b", r"\bmediales kompartiment\w*\b",
+            r"\bmediaal compartiment\b", r"\bmediale compartiment\w*\b",
+            r"\bmediaal femorotibiaal\b", r"\bmediale femurcondyl\w*\b",
+            r"\bmediale tibiaplateau\b", r"\besw diamerisma\b",
+            r"\bmedial\b", r"\binterno\b", r"\binnen\w*\b",
+        ),
+    ),
+    (
+        "lateral",
+        (
+            r"\blateral compartment\b", r"\blateral femorotibial\w*\b",
+            r"\blateral femoral condyl\w*\b", r"\blateral tibial plateau\b",
+            r"\bcompartimento lateral\b", r"\bcompartimento femorotibial externo\b",
+            r"\bcondilo femoral lateral\b", r"\bplatillo tibial lateral\b",
+            r"\blateral kompartman\w*\b", r"\bdis kompartman\w*\b",
+            r"\blateraler? femurkondyl\w*\b", r"\blaterales kompartiment\w*\b",
+            r"\blateraal compartiment\b", r"\blaterale compartiment\w*\b",
+            r"\blateraal femorotibiaal\b", r"\blaterale femurcondyl\w*\b",
+            r"\blaterale tibiaplateau\b",
+            r"\blateral\b", r"\bexterno\b", r"\baussen\w*\b", r"\bbuiten\w*\b",
+        ),
+    ),
+)
+
+# How reports ACTUALLY describe osteoarthritis. Derived from inspecting gold
+# positives the first lexicon missed: the language is cartilage damage, not the
+# word "osteoarthritis".
+CARTILAGE_DAMAGE_CUES: tuple[str, ...] = DEGENERATION_CUES + (
+    # en
+    r"\bcartilage (?:loss|thinning|defect|fissur\w*|damage|wear)\b",
+    r"\bchondral (?:loss|defect|ulcer\w*|fissur\w*|thinning)\b",
+    r"\bosteochondral defect\b", r"\bfissur\w*\b", r"\bdelaminat\w*\b",
+    r"\bsubchondral (?:cystic|cyst|sclerosis|marrow)\b",
+    r"\bfull[\s-]?thickness cartilage\b", r"\bjoint space (?:loss|narrowing)\b",
+    r"\bspurring\b", r"\bchondral wear\b",
+    # es
+    r"\bulceras? condral\w*\b", r"\bdefecto condral\w*\b", r"\bperdida de cartilago\b",
+    r"\badelgazamiento del cartilago\b", r"\bfisura\w*\b", r"\besclerosis subcondral\b",
+    r"\bquistes? subcondral\w*\b",
+    # tr
+    r"\bkikirdak (?:kayb\w*|incelme\w*|hasar\w*)\b", r"\bsubkondral\b",
+    # de
+    r"\bknorpel(?:verlust|schaden|glatzen|defekt|lasion|verschmalerung)\w*\b",
+    r"\bsubchondral\w*\b", r"\bgelenkspaltverschmalerung\b",
+    # nl
+    r"\bkraakbeen(?:lijden|verlies|schade|defect|laesie)\w*\b",
+    r"\bosteofytose\b", r"\bsubchondrale botveranderingen\b",
+    r"\bgewrichtsspleetversmalling\b",
+)

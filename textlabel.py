@@ -26,7 +26,13 @@ import numpy as np
 import pandas as pd
 
 from config import ID_COLUMN, PSEUDO_LABEL_COLUMNS, TARGET_COLUMNS
-from lexicon import FINDING_SPECS, SPEC_BY_COLUMN
+from lexicon import (
+    CARTILAGE_DAMAGE_CUES,
+    COMPARTMENT_PATTERNS,
+    FINDING_SPECS,
+    OA_COLUMN_BY_COMPARTMENT,
+    SPEC_BY_COLUMN,
+)
 
 LANGUAGES = ("en", "es", "tr", "de", "nl")
 
@@ -242,6 +248,104 @@ def split_clauses(text: str) -> list[str]:
     return [c.strip() for c in _CLAUSE_SPLIT.split(normalize(text)) if c.strip()]
 
 
+# ---------------------------------------------------------------------------
+# Section-aware parsing (needed for the OA columns)
+# ---------------------------------------------------------------------------
+_CARTILAGE_RE = re.compile("|".join(CARTILAGE_DAMAGE_CUES))
+_COMPARTMENT_RES: tuple[tuple[str, re.Pattern], ...] = tuple(
+    (name, re.compile("|".join(pats))) for name, pats in COMPARTMENT_PATTERNS
+)
+# Uncertainty abstains everywhere. Severity ("mild", "leve", "gering") does NOT
+# abstain for OA - gold counts "mild cartilage thinning" as positive - but does
+# for fluid findings, where "trace effusion" is genuinely ambiguous (§2.3).
+_UNCERTAINTY_RE = re.compile(
+    "|".join(
+        p
+        for p in HEDGE_CUES
+        if not re.search(
+            r"trace|minimal|minim|tiny|small amount|leve|escas|discret|gering|hafif|weinig|az miktarda",
+            p,
+        )
+    )
+)
+
+
+def _normalize_lines(text: str) -> list[str]:
+    """normalize() collapses newlines, which destroys the section structure the
+    OA parser depends on. This keeps line breaks."""
+    if text is None or (isinstance(text, float) and np.isnan(text)):
+        return []
+    s = str(text).lower()
+    s = "".join(_CHAR_MAP.get(ch, ch) for ch in s)
+    s = unicodedata.normalize("NFKD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    return [re.sub(r"[ \t]+", " ", ln).strip() for ln in s.splitlines()]
+
+
+def compartment_of(text: str) -> str | None:
+    """Which knee compartment does this text refer to, if any.
+
+    Patellofemoral is tested first on purpose: "medial patellar facet" belongs
+    to the patellofemoral joint, and reading it as the medial compartment would
+    write the finding into the wrong scored column.
+    """
+    for name, rx in _COMPARTMENT_RES:
+        if rx.search(text):
+            return name
+    return None
+
+
+def _is_header(line: str) -> bool:
+    """Section headers look like 'MEDIAL COMPARTMENT:' or 'Medial meniscus:'."""
+    return line.endswith(":") and len(line) <= 80
+
+
+def iter_sections(text: str):
+    """Yield ``(compartment, clause)``, carrying compartment across section
+    headers so a finding several lines below its header is still attributed."""
+    current: str | None = None
+    for line in _normalize_lines(text):
+        if not line:
+            continue
+        if _is_header(line):
+            found = compartment_of(line)
+            if found:
+                current = found
+            continue  # the header itself asserts no finding
+        for clause in (c.strip() for c in _CLAUSE_SPLIT.split(line) if c.strip()):
+            yield current, clause
+
+
+def _label_oa(text: str) -> dict[str, float | None]:
+    """Label the three OA columns via compartment attribution."""
+    votes: dict[str, dict[str, int]] = {
+        col: {"pos": 0, "neg": 0} for col in OA_COLUMN_BY_COMPARTMENT.values()
+    }
+    for section, clause in iter_sections(text):
+        if not _CARTILAGE_RE.search(clause):
+            continue
+        if _UNCERTAINTY_RE.search(clause):
+            continue  # "possible chondral defect" - no vote
+        compartment = compartment_of(clause) or section
+        if compartment is None:
+            continue
+        column = OA_COLUMN_BY_COMPARTMENT[compartment]
+        negated = bool(_NEG_RE.search(_NEG_EXCEPTION_RE.sub(" ", clause)))
+        if negated and _SIGNIF_RE.search(clause):
+            continue
+        votes[column]["neg" if negated else "pos"] += 1
+
+    out: dict[str, float | None] = {}
+    for column, v in votes.items():
+        if v["pos"] and not v["neg"]:
+            out[column] = 1.0
+        elif v["neg"] and not v["pos"]:
+            out[column] = 0.0
+        else:
+            out[column] = None
+    return out
+
+
 def _near(clause: str, span: tuple[int, int], pattern, window: int) -> bool:
     """Is there a match of ``pattern`` within ``window`` chars of ``span``?
 
@@ -304,7 +408,17 @@ def label_report(text: str, columns: Iterable[str] | None = None) -> dict[str, f
     wanted = [c for c in (columns if columns is not None else SPEC_BY_COLUMN)]
     out: dict[str, float | None] = {c: None for c in wanted}
     clauses = split_clauses(text)
+
+    # OA columns use section-aware compartment attribution, not clause matching.
+    oa_columns = set(OA_COLUMN_BY_COMPARTMENT.values())
+    if oa_columns & set(wanted):
+        for column, value in _label_oa(text).items():
+            if column in out:
+                out[column] = value
+
     for column in wanted:
+        if column in oa_columns:
+            continue
         spec = SPEC_BY_COLUMN.get(column)
         if spec is None:
             continue

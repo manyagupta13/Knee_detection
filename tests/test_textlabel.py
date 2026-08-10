@@ -220,6 +220,69 @@ def test_acl_intact_is_a_clean_negative():
         assert label_report(text)["ACL"] == 0.0, text
 
 
+# ---------------------------------------------------------------------------
+# OA: section-aware compartment attribution (all cases below are real phrasings
+# taken from gold-positive reports the first lexicon missed entirely)
+# ---------------------------------------------------------------------------
+STRUCTURED_REPORT = """MEDIAL COMPARTMENT:
+Medial meniscus: intact.
+Medial compartment cartilage: Mild cartilage thinning of the medial femoral condyle.
+PATELLOFEMORAL COMPARTMENT:
+Patellofemoral compartment cartilage:
+High-grade cartilage loss along the medial patellar facet."""
+
+
+def test_section_header_scopes_findings_below_it():
+    """The finding sits lines below its compartment header, so clause-local
+    matching can never connect them."""
+    out = label_report(STRUCTURED_REPORT)
+    assert out["Medial OA"] == 1.0
+    assert out["PF OA"] == 1.0
+
+
+def test_medial_patellar_facet_is_patellofemoral_not_medial():
+    """The trap: 'medial patellar facet' belongs to the patellofemoral joint.
+    Reading the word 'medial' would write it into the wrong scored column."""
+    out = label_report("High-grade cartilage loss along the medial patellar facet.")
+    assert out["PF OA"] == 1.0
+    assert out["Medial OA"] is None
+
+
+def test_lateral_patellar_facet_is_patellofemoral_not_lateral():
+    out = label_report("Focal osteochondral defect at lateral patellar facet.")
+    assert out["PF OA"] == 1.0
+    assert out["Lateral OA"] is None
+
+
+@pytest.mark.parametrize(
+    "text,column",
+    [
+        ("Ulceras condrales de espesor total del condilo femoral medial.", "Medial OA"),
+        (
+            "Gevorderd lateraal femorotibiaal kraakbeenlijden met kraakbeenverlies "
+            "van het laterale tibiaplateau, met marginale osteofytose.",
+            "Lateral OA",
+        ),
+        ("Multifocal delaminating fissuring of the cartilage of the patellar facet.", "PF OA"),
+        ("Chondral defect of the lateral tibial plateau.", "Lateral OA"),
+    ],
+)
+def test_real_world_oa_phrasings(text, column):
+    assert label_report(text)[column] == 1.0, (text, column)
+
+
+def test_mild_severity_still_counts_as_oa():
+    """Gold labels 'mild cartilage thinning' as positive, so severity words must
+    not abstain here - unlike 'trace effusion', which genuinely should."""
+    assert label_report("Mild cartilage thinning of the medial femoral condyle.")["Medial OA"] == 1.0
+    assert label_report("Trace effusion.")["Effusion"] is None
+
+
+def test_uncertainty_still_abstains_for_oa():
+    out = label_report("Possible chondral defect of the medial femoral condyle.")
+    assert out["Medial OA"] is None
+
+
 def test_bare_marrow_edema_is_not_a_contusion():
     """MEASURED against gold: treating bare "bone marrow edema" as a contusion
     scored precision 0.556. Marrow edema is common in OA and stress reaction,
