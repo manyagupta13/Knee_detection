@@ -27,10 +27,13 @@ import pandas as pd
 
 from config import ID_COLUMN, PSEUDO_LABEL_COLUMNS, TARGET_COLUMNS
 from lexicon import (
-    CARTILAGE_DAMAGE_CUES,
+    CARTILAGE_DAMAGE_WORDS,
+    CARTILAGE_WORDS,
     COMPARTMENT_PATTERNS,
     FINDING_SPECS,
     OA_COLUMN_BY_COMPARTMENT,
+    OA_EXPLICIT_CUES,
+    OA_INTEGRITY_CUES,
     SPEC_BY_COLUMN,
 )
 
@@ -251,7 +254,10 @@ def split_clauses(text: str) -> list[str]:
 # ---------------------------------------------------------------------------
 # Section-aware parsing (needed for the OA columns)
 # ---------------------------------------------------------------------------
-_CARTILAGE_RE = re.compile("|".join(CARTILAGE_DAMAGE_CUES))
+_OA_EXPLICIT_RE = re.compile("|".join(OA_EXPLICIT_CUES))
+_CARTILAGE_WORD_RE = re.compile("|".join(CARTILAGE_WORDS))
+_CARTILAGE_DAMAGE_RE = re.compile("|".join(CARTILAGE_DAMAGE_WORDS))
+_OA_INTEGRITY_RE = re.compile("|".join(OA_INTEGRITY_CUES))
 _COMPARTMENT_RES: tuple[tuple[str, re.Pattern], ...] = tuple(
     (name, re.compile("|".join(pats))) for name, pats in COMPARTMENT_PATTERNS
 )
@@ -312,7 +318,13 @@ def iter_sections(text: str):
             if found:
                 current = found
             continue  # the header itself asserts no finding
-        for clause in (c.strip() for c in _CLAUSE_SPLIT.split(line) if c.strip()):
+        # An inline "label: value" line ("Medial compartment cartilage: intact")
+        # must stay one clause - splitting on the colon separates the structure
+        # from its verdict and both halves become uninterpretable.
+        inline = line.replace(":", " ")
+        if (found := compartment_of(line.split(":", 1)[0])) and ":" in line:
+            current = found
+        for clause in (c.strip() for c in _CLAUSE_SPLIT.split(inline) if c.strip()):
             yield current, clause
 
 
@@ -322,10 +334,18 @@ def _label_oa(text: str) -> dict[str, float | None]:
         col: {"pos": 0, "neg": 0} for col in OA_COLUMN_BY_COMPARTMENT.values()
     }
     for section, clause in iter_sections(text):
-        if not _CARTILAGE_RE.search(clause):
+        explicit = bool(_OA_EXPLICIT_RE.search(clause))
+        about_cartilage = bool(_CARTILAGE_WORD_RE.search(clause))
+        damaged = about_cartilage and bool(_CARTILAGE_DAMAGE_RE.search(clause))
+
+        # A bare degeneration word is NOT enough: "medial meniscus ...
+        # intrasubstance degeneration" is a meniscal finding, not OA, and it
+        # sits under a "Medial compartment:" header.
+        if not (explicit or damaged or about_cartilage):
             continue
         if _UNCERTAINTY_RE.search(clause):
             continue  # "possible chondral defect" - no vote
+
         compartment = compartment_of(clause) or section
         if compartment is None:
             continue
@@ -333,7 +353,19 @@ def _label_oa(text: str) -> dict[str, float | None]:
         negated = bool(_NEG_RE.search(_NEG_EXCEPTION_RE.sub(" ", clause)))
         if negated and _SIGNIF_RE.search(clause):
             continue
-        votes[column]["neg" if negated else "pos"] += 1
+
+        if explicit or damaged:
+            votes[column]["neg" if negated else "pos"] += 1
+        elif about_cartilage and _OA_INTEGRITY_RE.search(clause):
+            # "Medial compartment cartilage: intact" / "Cartilago rotuliano sin
+            # alteraciones" - the negatives the first pass discarded, which is
+            # why 95% of emitted OA labels were positive.
+            #
+            # Deliberately NOT flipped on negation: the common integrity phrases
+            # ("sin alteraciones", "geen afwijkingen") carry their own negation,
+            # and flipping turned "patellar cartilage unremarkable" into a
+            # positive. Rare "not intact" phrasing is sacrificed for that.
+            votes[column]["neg"] += 1
 
     out: dict[str, float | None] = {}
     for column, v in votes.items():

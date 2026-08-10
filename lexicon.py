@@ -324,7 +324,9 @@ COMPARTMENT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     (
         "pf",
         (
-            r"\bpatellofemoral\w*\b", r"\bfemoropatelar\w*\b", r"\bfemoropatellair\w*\b",
+            # "patellofemora\w*" not "patellofemoral\w*": Dutch spells it
+            # "patellofemoraal", which the stricter stem misses.
+            r"\bpatellofemora\w*\b", r"\bfemoropatelar\w*\b", r"\bfemoropatellair\w*\b",
             r"\bfemoropatellar\w*\b", r"\bretropatellar\w*\b",
             r"\bpatellar facet\b", r"\bpatella\w* facet\b", r"\bfacet of the patella\b",
             r"\btrochlea\w*\b", r"\bpatellar cartilage\b", r"\bcartilago rotulian\w*\b",
@@ -346,7 +348,7 @@ COMPARTMENT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
             r"\bmediaal compartiment\b", r"\bmediale compartiment\w*\b",
             r"\bmediaal femorotibiaal\b", r"\bmediale femurcondyl\w*\b",
             r"\bmediale tibiaplateau\b", r"\besw diamerisma\b",
-            r"\bmedial\b", r"\binterno\b", r"\binnen\w*\b",
+            r"\bmedial\b", r"\bmediaal\w*\b", r"\binterno\b", r"\binnen\w*\b",
         ),
     ),
     (
@@ -361,14 +363,63 @@ COMPARTMENT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
             r"\blateraal compartiment\b", r"\blaterale compartiment\w*\b",
             r"\blateraal femorotibiaal\b", r"\blaterale femurcondyl\w*\b",
             r"\blaterale tibiaplateau\b",
-            r"\blateral\b", r"\bexterno\b", r"\baussen\w*\b", r"\bbuiten\w*\b",
+            r"\blateral\b", r"\blateraal\w*\b", r"\bexterno\b", r"\baussen\w*\b",
+            r"\bbuiten\w*\b",
         ),
     ),
 )
 
-# How reports ACTUALLY describe osteoarthritis. Derived from inspecting gold
-# positives the first lexicon missed: the language is cartilage damage, not the
-# word "osteoarthritis".
+# MEASURED (iteration 2): keying OA off a bare degeneration cue gave precision
+# 0.55-0.63 and made 95% of emitted OA labels positive, because
+#   (a) "posterior horn of the medial meniscus ... intrasubstance degeneration"
+#       under a "Medial compartment:" header voted Medial OA positive - that is
+#       MENISCAL degeneration, a different scored column entirely; and
+#   (b) nothing ever produced a negative, so the label set carried no contrast.
+#
+# So a clause now only votes on OA if it is explicitly an OA term, or it is
+# demonstrably about CARTILAGE. And explicit normality of cartilage produces a
+# clean negative.
+OA_EXPLICIT_CUES: tuple[str, ...] = (
+    r"\bosteoarthrit\w*\b", r"\barthros\w*\b", r"\bgonarthros\w*\b",
+    r"\bartros\w*\b", r"\bgonartros\w*\b", r"\bartroz\w*\b", r"\bosteoartrit\w*\b",
+    r"\bosteophyt\w*\b", r"\bosteofit\w*\b", r"\bosteofyt\w*\b",
+    r"\bjoint space (?:loss|narrowing)\b", r"\bpinzamiento\b",
+    r"\bgelenkspaltverschmalerung\b", r"\bgewrichtsspleetversmalling\b",
+    r"\bchondromalac\w*\b", r"\bcondromalac\w*\b", r"\bkondromalaz\w*\b",
+    r"\bchondropath\w*\b", r"\bcondropat\w*\b", r"\bkraakbeenlijden\b",
+    r"\bknorpelglatzen\b", r"\bspurring\b",
+)
+
+# Words that establish the sentence is about cartilage at all.
+CARTILAGE_WORDS: tuple[str, ...] = (
+    r"\bcartilage\b", r"\bcartilago\b", r"\bcartilaginos\w*\b",
+    r"\bchondral\b", r"\bosteochondral\b", r"\bcondral\w*\b", r"\bkondral\w*\b",
+    r"\bknorpel\w*\b", r"\bkraakbeen\w*\b", r"\bkikirdak\w*\b",
+)
+
+# Damage predicates - only count when a cartilage word is also present.
+CARTILAGE_DAMAGE_WORDS: tuple[str, ...] = (
+    r"\bloss\b", r"\bthinning\b", r"\bdefect\w*\b", r"\bulcer\w*\b",
+    r"\bfissur\w*\b", r"\bdelaminat\w*\b", r"\bwear\b", r"\bdamage\b",
+    r"\bfull[\s-]?thickness\b", r"\bhigh[\s-]?grade\b", r"\blesion\w*\b",
+    r"\bperdida\b", r"\badelgazamiento\b", r"\bulceras?\b", r"\bdefecto\w*\b",
+    r"\bfisura\w*\b", r"\bespesor (?:parcial|total)\b",
+    r"\bkayb\w*\b", r"\bincelme\w*\b", r"\bhasar\w*\b",
+    r"\bverlust\w*\b", r"\bschaden\b", r"\blasion\w*\b", r"\bverschmalerung\b",
+    r"\bverlies\b", r"\blijden\b", r"\bschade\b", r"\blaesie\w*\b",
+)
+
+# Explicit normality of cartilage - the negatives the first pass threw away.
+OA_INTEGRITY_CUES: tuple[str, ...] = (
+    r"\bintact\b", r"\bnormal\w*\b", r"\bunremarkable\b", r"\bpreserved\b",
+    r"\bno (?:significant )?(?:chondral|cartilage) (?:loss|defect|abnormalit\w*)\b",
+    r"\bsin alteracion\w*\b", r"\bconservad\w*\b", r"\bintegr\w*\b",
+    r"\bdogal\b", r"\bkorunmus\b",
+    r"\bunauffallig\w*\b", r"\bregelrecht\w*\b", r"\bintakt\b",
+    r"\bnormaal\b", r"\bnormale\b", r"\bgeen afwijking\w*\b",
+)
+
+# Retained for reference/back-compat; no longer the OA trigger on its own.
 CARTILAGE_DAMAGE_CUES: tuple[str, ...] = DEGENERATION_CUES + (
     # en
     r"\bcartilage (?:loss|thinning|defect|fissur\w*|damage|wear)\b",

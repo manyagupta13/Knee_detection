@@ -271,6 +271,37 @@ def test_real_world_oa_phrasings(text, column):
     assert label_report(text)[column] == 1.0, (text, column)
 
 
+def test_meniscal_degeneration_is_not_oa():
+    """MEASURED: 'medial meniscus ... intrasubstance degeneration' sits under a
+    'Medial compartment:' header. A bare degeneration cue read it as Medial OA,
+    which is a different scored column. OA now requires cartilage or an
+    explicit OA term."""
+    text = (
+        "Medial compartment (meniscus, cartilage):\n"
+        "Increased signal in the posterior horn of the medial meniscus, "
+        "compatible with intrasubstance degeneration."
+    )
+    assert label_report(text)["Medial OA"] is None
+
+
+@pytest.mark.parametrize(
+    "text,column",
+    [
+        ("Medial compartment cartilage: intact.", "Medial OA"),
+        ("Cartilago rotuliano sin alteraciones.", "PF OA"),
+        ("Patellofemoraal kraakbeen geen afwijkingen.", "PF OA"),
+    ],
+)
+def test_normal_cartilage_yields_a_negative(text, column):
+    """Without these, 95% of emitted OA labels were positive and the column
+    carried no contrast for the model to learn from.
+
+    Note two traps: an inline 'label: value' line must not be split on the
+    colon, and 'sin alteraciones' / 'geen afwijkingen' carry their own negation,
+    so a negation flip would turn them into false positives."""
+    assert label_report(text)[column] == 0.0
+
+
 def test_mild_severity_still_counts_as_oa():
     """Gold labels 'mild cartilage thinning' as positive, so severity words must
     not abstain here - unlike 'trace effusion', which genuinely should."""
