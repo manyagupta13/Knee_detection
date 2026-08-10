@@ -201,7 +201,8 @@ def test_laterality_is_anchored_not_bag_of_words():
         ("Quiste de Baker en el hueco popliteo.", "Baker's"),
         ("Bakerzyste nachweisbar.", "Baker's"),
         ("Sinovitis con engrosamiento sinovial.", "Synovitis"),
-        ("Bone marrow edema in the lateral femoral condyle.", "Contusion"),
+        ("Bone bruise of the lateral femoral condyle.", "Contusion"),
+        ("Acute bone marrow edema following trauma.", "Contusion"),
         ("Chondromalacia patellae grade 3.", "PF OA"),
         ("Medial compartment osteoarthritis with osteophytes.", "Medial OA"),
     ],
@@ -217,6 +218,14 @@ def test_acl_intact_is_a_clean_negative():
         "Vorderes Kreuzband intakt.",
     ]:
         assert label_report(text)["ACL"] == 0.0, text
+
+
+def test_bare_marrow_edema_is_not_a_contusion():
+    """MEASURED against gold: treating bare "bone marrow edema" as a contusion
+    scored precision 0.556. Marrow edema is common in OA and stress reaction,
+    so it needs a trauma cue before it counts."""
+    assert label_report("Bone marrow edema in the medial tibial plateau.")["Contusion"] is None
+    assert label_report("Subchondral marrow oedema with osteoarthritis.")["Contusion"] is None
 
 
 def test_degeneration_is_not_a_meniscal_tear():

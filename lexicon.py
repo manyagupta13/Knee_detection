@@ -256,14 +256,33 @@ FINDING_SPECS: tuple[FindingSpec, ...] = (
     ),
     FindingSpec(
         column="Contusion",
+        # MEASURED: with bare "bone marrow edema" treated as self-sufficient this
+        # column scored precision 0.556 against gold - marrow edema is a common
+        # incidental finding in osteoarthritis, stress reaction and degenerative
+        # change, not just trauma. Only explicitly traumatic terms are
+        # self-sufficient now; marrow edema needs a trauma cue nearby.
         self_sufficient=(
             r"\bcontusion\w*\b", r"\bbone bruise\w*\b",
-            r"\bbone marrow (?:o)?edema\b", r"\bmarrow (?:o)?edema\b",
-            r"\bcontusion osea\b", r"\bedema oseo\b", r"\bedema de medula osea\b",
-            r"\bkontuzyon\w*\b", r"\bkemik ilik odem\w*\b", r"\bkemik odem\w*\b",
-            r"\bkontusion\w*\b", r"\bknochenmarkodem\w*\b", r"\bknochenodem\w*\b",
-            r"\bcontusie\w*\b", r"\bbotcontusie\w*\b", r"\bbeenmergoedeem\b",
+            r"\bcontusion osea\b",
+            r"\bkontuzyon\w*\b",
+            r"\bkontusion\w*\b", r"\bbone[\s-]?bruise\b",
+            r"\bcontusie\w*\b", r"\bbotcontusie\w*\b",
         ),
+        structures=(
+            r"\bbone marrow (?:o)?edema\b", r"\bmarrow (?:o)?edema\b",
+            r"\bedema oseo\b", r"\bedema de medula osea\b",
+            r"\bkemik ilik odem\w*\b", r"\bkemik odem\w*\b",
+            r"\bknochenmarkodem\w*\b", r"\bknochenodem\w*\b",
+            r"\bbeenmergoedeem\b",
+        ),
+        pathology=(
+            r"\btrauma\w*\b", r"\bcontusion\w*\b", r"\bbruise\w*\b", r"\bimpact\w*\b",
+            r"\bacute\b", r"\bfractur\w*\b", r"\bsprain\w*\b",
+            r"\btravma\w*\b", r"\bakut\b",
+            r"\btraumat\w*\b", r"\bprellung\w*\b", r"\bakute\w*\b",
+            r"\btraumatis\w*\b",
+        ),
+        window=100,
     ),
     FindingSpec(
         column="Fracture",
