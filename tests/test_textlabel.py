@@ -109,8 +109,14 @@ def test_contrastive_clause_is_split():
     assert out["Effusion"] == 1.0
 
 
-def test_only_phase0_columns_are_produced():
-    assert set(label_report(POSITIVES["en"])) == set(PSEUDO_LABEL_COLUMNS)
+def test_all_twelve_columns_are_produced():
+    """Phase 1 widened the labeler from 2 columns to all 12."""
+    assert set(label_report(POSITIVES["en"])) == set(TARGET_COLUMNS)
+
+
+def test_columns_argument_restricts_output():
+    out = label_report(POSITIVES["en"], columns=["Effusion"])
+    assert set(out) == {"Effusion"}
 
 
 def test_label_reports_emits_full_width_frame_and_mask(fixture_dir):
@@ -156,6 +162,70 @@ def test_coverage_report_shape(fixture_dir):
     assert eff["positive"] > 0 and eff["negative"] > 0
 
 
+# ---------------------------------------------------------------------------
+# Phase 1: structure+cue findings and laterality anchoring
+# ---------------------------------------------------------------------------
+def test_structure_mention_alone_is_not_a_finding():
+    """PLAN.md §2.3: the medial meniscus is named in 62% of reports where it is
+    NORMAL. Naming the structure must prove nothing on its own."""
+    out = label_report("The medial meniscus is visualized on sagittal images.")
+    assert out["Medial Meniscus"] is None
+
+
+def test_structure_with_tear_cue_is_positive():
+    out = label_report("There is a tear of the medial meniscus posterior horn.")
+    assert out["Medial Meniscus"] == 1.0
+
+
+def test_structure_with_integrity_cue_is_negative():
+    out = label_report("The medial meniscus is intact.")
+    assert out["Medial Meniscus"] == 0.0
+
+
+def test_laterality_is_anchored_not_bag_of_words():
+    """The single most dangerous failure mode: medial and lateral are separate
+    scored columns, so a tear on one must never label the other."""
+    out = label_report("The medial meniscus is intact. The lateral meniscus is torn.")
+    assert out["Lateral Meniscus"] == 1.0
+    assert out["Medial Meniscus"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "text,column",
+    [
+        ("Rotura del menisco interno.", "Medial Meniscus"),
+        ("Innenmeniskusriss nachweisbar.", "Medial Meniscus"),
+        ("Dis menisk yirtigi izlenmektedir.", "Lateral Meniscus"),
+        ("Ruptuur van de voorste kruisband.", "ACL"),
+        ("Complete tear of the anterior cruciate ligament.", "ACL"),
+        ("Quiste de Baker en el hueco popliteo.", "Baker's"),
+        ("Bakerzyste nachweisbar.", "Baker's"),
+        ("Sinovitis con engrosamiento sinovial.", "Synovitis"),
+        ("Bone marrow edema in the lateral femoral condyle.", "Contusion"),
+        ("Chondromalacia patellae grade 3.", "PF OA"),
+        ("Medial compartment osteoarthritis with osteophytes.", "Medial OA"),
+    ],
+)
+def test_multilingual_positive_examples(text, column):
+    assert label_report(text)[column] == 1.0, (text, column)
+
+
+def test_acl_intact_is_a_clean_negative():
+    for text in [
+        "The anterior cruciate ligament is intact.",
+        "Ligamento cruzado anterior integro.",
+        "Vorderes Kreuzband intakt.",
+    ]:
+        assert label_report(text)["ACL"] == 0.0, text
+
+
+def test_degeneration_is_not_a_meniscal_tear():
+    """Degenerative signal != tear. Conflating them manufactures false
+    positives on the two meniscus columns."""
+    out = label_report("Degenerative signal within the medial meniscus without tear.")
+    assert out["Medial Meniscus"] != 1.0
+
+
 def test_empty_and_garbage_input():
     for text in ["", None, float("nan"), "12345 !!! ---"]:
-        assert label_report(text) == {c: None for c in PSEUDO_LABEL_COLUMNS}
+        assert label_report(text) == {c: None for c in TARGET_COLUMNS}

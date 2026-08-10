@@ -26,6 +26,7 @@ import numpy as np
 import pandas as pd
 
 from config import ID_COLUMN, PSEUDO_LABEL_COLUMNS, TARGET_COLUMNS
+from lexicon import FINDING_SPECS, SPEC_BY_COLUMN
 
 LANGUAGES = ("en", "es", "tr", "de", "nl")
 
@@ -218,40 +219,109 @@ _TERM_RE = {
     for finding, langs in FINDING_TERMS.items()
 }
 
+# Compiled forms of the Phase-1 lexicon.
+_SELF_RE = {
+    s.column: re.compile("|".join(s.self_sufficient)) if s.self_sufficient else None
+    for s in FINDING_SPECS
+}
+_STRUCT_RE = {
+    s.column: re.compile("|".join(s.structures)) if s.structures else None
+    for s in FINDING_SPECS
+}
+_PATH_RE = {
+    s.column: re.compile("|".join(s.pathology)) if s.pathology else None
+    for s in FINDING_SPECS
+}
+_INTEG_RE = {
+    s.column: re.compile("|".join(s.integrity)) if s.integrity else None
+    for s in FINDING_SPECS
+}
+
 
 def split_clauses(text: str) -> list[str]:
     return [c.strip() for c in _CLAUSE_SPLIT.split(normalize(text)) if c.strip()]
 
 
-def label_report(text: str) -> dict[str, float | None]:
-    """Label one report. Returns {finding: 1.0 | 0.0 | None} for Phase-0 columns.
+def _near(clause: str, span: tuple[int, int], pattern, window: int) -> bool:
+    """Is there a match of ``pattern`` within ``window`` chars of ``span``?
 
-    ``None`` means "no opinion" and becomes NaN + mask=False downstream.
+    This is what anchors a tear cue to the structure it belongs to, so that
+    "medial meniscus intact, lateral meniscus torn" does not label both.
     """
-    out: dict[str, float | None] = {f: None for f in PSEUDO_LABEL_COLUMNS}
+    if pattern is None:
+        return False
+    lo = max(0, span[0] - window)
+    hi = min(len(clause), span[1] + window)
+    return bool(pattern.search(clause, lo, hi))
+
+
+def _vote_for_clause(column: str, clause: str, spec) -> str | None:
+    """One clause's vote for one finding: 'pos', 'neg', or None (abstain)."""
+    negated = bool(_NEG_RE.search(_NEG_EXCEPTION_RE.sub(" ", clause)))
+    hedged = bool(_HEDGE_RE.search(clause))
+
+    # --- self-sufficient terms: the term IS the finding ---
+    self_re = _SELF_RE.get(column)
+    if self_re is not None and self_re.search(clause):
+        if hedged:
+            return None
+        if negated and _SIGNIF_RE.search(clause):
+            return None  # "no significant effusion"
+        return "neg" if negated else "pos"
+
+    # --- structure + cue: presence of the structure proves nothing ---
+    struct_re = _STRUCT_RE.get(column)
+    if struct_re is None:
+        return None
+    match = struct_re.search(clause)
+    if match is None:
+        return None
+
+    if _near(clause, match.span(), _PATH_RE.get(column), spec.window):
+        if hedged:
+            return None
+        if negated and _SIGNIF_RE.search(clause):
+            return None
+        return "neg" if negated else "pos"
+
+    if _near(clause, match.span(), _INTEG_RE.get(column), spec.window):
+        if hedged:
+            return None
+        # "not intact" flips an integrity statement back to positive
+        return "pos" if negated else "neg"
+
+    # Structure named with neither cue nearby - no opinion.
+    return None
+
+
+def label_report(text: str, columns: Iterable[str] | None = None) -> dict[str, float | None]:
+    """Label one report. Returns {finding: 1.0 | 0.0 | None}.
+
+    ``None`` means "no opinion" and becomes NaN + mask=False downstream, which
+    is the whole point: abstaining costs recall, guessing costs precision, and
+    only precision is recoverable later.
+    """
+    wanted = [c for c in (columns if columns is not None else SPEC_BY_COLUMN)]
+    out: dict[str, float | None] = {c: None for c in wanted}
     clauses = split_clauses(text)
-    for finding in PSEUDO_LABEL_COLUMNS:
-        term_re = _TERM_RE[finding]
+    for column in wanted:
+        spec = SPEC_BY_COLUMN.get(column)
+        if spec is None:
+            continue
         positives = 0
         negatives = 0
         for clause in clauses:
-            if not term_re.search(clause):
-                continue
-            negated = bool(_NEG_RE.search(_NEG_EXCEPTION_RE.sub(" ", clause)))
-            if _HEDGE_RE.search(clause):
-                continue  # hedged -> this clause casts no vote
-            if negated and _SIGNIF_RE.search(clause):
-                continue  # "no significant effusion" -> abstain
-            if negated:
-                negatives += 1
-            else:
+            vote = _vote_for_clause(column, clause, spec)
+            if vote == "pos":
                 positives += 1
+            elif vote == "neg":
+                negatives += 1
         if positives and not negatives:
-            out[finding] = 1.0
+            out[column] = 1.0
         elif negatives and not positives:
-            out[finding] = 0.0
+            out[column] = 0.0
         else:
-            out[finding] = None  # nothing found, or a contradiction
+            out[column] = None  # nothing found, or a contradiction
     return out
 
 
@@ -270,10 +340,14 @@ def label_reports(
     columns = list(columns)
     index = pd.Index(reports[id_col].astype(str), name=id_col)
     labels = pd.DataFrame(np.nan, index=index, columns=columns, dtype=float)
-    for uid, text in zip(index, reports[text_col]):
-        for finding, value in label_report(text).items():
-            if value is not None and finding in labels.columns:
-                labels.loc[uid, finding] = value
+    # Build row-wise then assign once; .loc per cell is O(n) reallocation and
+    # turns 4,400 reports into minutes.
+    records = []
+    for text in reports[text_col]:
+        row = label_report(text, columns=columns)
+        records.append([row.get(c) for c in columns])
+    values = pd.DataFrame(records, index=index, columns=columns, dtype=float)
+    labels.loc[:, columns] = values
     mask = labels.notna()
     return labels, mask
 
