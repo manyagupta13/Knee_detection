@@ -35,7 +35,21 @@ class GatedAttentionPool(nn.Module):
         return pooled, attn
 
 
+# Plane ids for the series embedding. 0 is reserved for "unknown/missing".
+PLANE_IDS: dict[str, int] = {"unknown": 0, "sagittal": 1, "coronal": 2, "axial": 3}
+N_PLANES = 4
+
+
 class KneeModel(nn.Module):
+    """Slice encoder -> attention over slices -> attention over series -> 12 heads.
+
+    Findings live in different planes: MCL and the femorotibial compartments are
+    coronal calls, patellofemoral cartilage is best seen axially, the cruciates
+    and meniscal horns sagittally. A sagittal-only model is structurally unable
+    to see a third of what it is scored on, so series are pooled with their own
+    gated attention and tagged with a plane embedding.
+    """
+
     def __init__(
         self,
         backbone: str = "efficientnet_b0",
@@ -51,28 +65,48 @@ class KneeModel(nn.Module):
             backbone, pretrained=pretrained, num_classes=0, global_pool="avg"
         )
         feat_dim = self.backbone.num_features
+        self.feat_dim = feat_dim
         self.slice_pool = GatedAttentionPool(feat_dim)
+        self.series_pool = GatedAttentionPool(feat_dim)
+        self.plane_emb = nn.Embedding(N_PLANES, feat_dim)
+        nn.init.zeros_(self.plane_emb.weight)  # start as a no-op
         self.dropout = nn.Dropout(dropout)
         self.head = nn.Linear(feat_dim, n_targets)
-        # TODO(phase-3): a second GatedAttentionPool over the series axis, plus
-        # plane/contrast embeddings. Phase 0 consumes one series.
 
     def forward(
         self,
         x: torch.Tensor,
+        series_mask: torch.Tensor | None = None,
+        plane_ids: torch.Tensor | None = None,
         slice_mask: torch.Tensor | None = None,
         return_attention: bool = False,
     ):
-        """x: (B, n_slices, 3, H, W) -> logits (B, n_targets)."""
-        if x.ndim != 5:
-            raise ValueError(f"expected (B, S, 3, H, W), got {tuple(x.shape)}")
-        b, s = x.shape[:2]
-        feats = self.backbone(x.flatten(0, 1))  # (B*S, D)
-        feats = feats.view(b, s, -1)
-        pooled, attn = self.slice_pool(feats, mask=slice_mask)
+        """(B, S, T, 3, H, W) -> logits (B, n_targets).
+
+        A 5-D input (B, T, 3, H, W) is accepted as the single-series case and
+        promoted to S=1, so the Phase-0 call signature keeps working.
+        """
+        if x.ndim == 5:
+            x = x.unsqueeze(1)
+        if x.ndim != 6:
+            raise ValueError(f"expected (B, S, T, 3, H, W), got {tuple(x.shape)}")
+
+        b, s, t = x.shape[:3]
+        feats = self.backbone(x.flatten(0, 2))            # (B*S*T, D)
+        feats = feats.view(b * s, t, -1)
+        series_feat, slice_attn = self.slice_pool(feats, mask=slice_mask)
+        series_feat = series_feat.view(b, s, -1)          # (B, S, D)
+
+        if plane_ids is not None:
+            series_feat = series_feat + self.plane_emb(plane_ids.long())
+
+        pooled, series_attn = self.series_pool(series_feat, mask=series_mask)
         logits = self.head(self.dropout(pooled))
         if return_attention:
-            return logits, attn
+            return logits, {
+                "slice": slice_attn.view(b, s, t),
+                "series": series_attn,
+            }
         return logits
 
 

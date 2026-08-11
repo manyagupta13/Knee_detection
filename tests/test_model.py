@@ -32,9 +32,39 @@ def test_attention_is_a_distribution_over_slices(model):
     x = torch.rand(2, 5, 3, 64, 64)
     with torch.no_grad():
         _, attn = model(x, return_attention=True)
-    assert attn.shape == (2, 5)
-    assert torch.allclose(attn.sum(1), torch.ones(2), atol=1e-5)
-    assert (attn >= 0).all()
+    slice_attn = attn["slice"]
+    assert slice_attn.shape == (2, 1, 5)  # (B, S, T) with S=1 for 5-D input
+    assert torch.allclose(slice_attn.sum(-1), torch.ones(2, 1), atol=1e-5)
+    assert (slice_attn >= 0).all()
+
+
+def test_multi_series_forward_and_series_attention(model):
+    """(B, S, T, 3, H, W): three planes per study."""
+    x = torch.rand(2, 3, 4, 3, 64, 64)
+    series_mask = torch.tensor([[1.0, 1.0, 1.0], [1.0, 1.0, 0.0]])
+    plane_ids = torch.tensor([[1, 2, 3], [1, 2, 0]])
+    with torch.no_grad():
+        logits, attn = model(
+            x, series_mask=series_mask, plane_ids=plane_ids, return_attention=True
+        )
+    assert logits.shape == (2, N_TARGETS)
+    assert attn["series"].shape == (2, 3)
+    assert torch.allclose(attn["series"].sum(-1), torch.ones(2), atol=1e-5)
+    # a masked-out series must receive no attention
+    assert float(attn["series"][1, 2]) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_missing_series_does_not_change_prediction(model):
+    """Zero-filled padding slots must be ignored, not averaged in."""
+    x = torch.rand(1, 3, 4, 3, 64, 64)
+    x[:, 2] = 0.0
+    full = torch.tensor([[1.0, 1.0, 0.0]])
+    with torch.no_grad():
+        a = model(x, series_mask=full, plane_ids=torch.tensor([[1, 2, 0]]))
+        x2 = x.clone()
+        x2[:, 2] = torch.rand_like(x2[:, 2])  # garbage in the masked slot
+        b = model(x2, series_mask=full, plane_ids=torch.tensor([[1, 2, 0]]))
+    assert torch.allclose(a, b, atol=1e-5)
 
 
 def test_attention_pool_respects_mask():

@@ -62,11 +62,13 @@ class StudyVolume(NamedTuple):
     pixels:      uint8, shape (max_series, n_slices, size, size)
     series_mask: bool,  shape (max_series,) - True where a real series was found
     series_uids: list[str | None], length max_series
+    planes:      plane of each slot, for the model's plane embedding
     """
 
     pixels: np.ndarray
     series_mask: np.ndarray
     series_uids: list[str | None]
+    planes: list[str]  # "sagittal"/"coronal"/"axial"/"unknown", per slot
 
 
 def _norm_text(value) -> str:
@@ -232,12 +234,29 @@ def select_series(
 
     chosen: list[dict] = []
     seen: set[str] = set()
-    for pref in list(plane_prefs) + ["any_any"]:  # last resort: take anything
+
+    # ONE series per preference entry. Taking every match of the first
+    # preference would fill all three slots with sagittal series on studies that
+    # have several, defeating the point of multi-plane input.
+    for pref in plane_prefs:
+        if len(chosen) >= max_series:
+            break
         for row, plane, contrast in classified:
-            if len(chosen) >= max_series:
-                return chosen
             uid = str(row["SeriesInstanceUID"])
             if uid in seen or not _pref_matches(pref, plane, contrast):
+                continue
+            seen.add(uid)
+            chosen.append(row)
+            break  # next preference
+
+    # Any leftover slots get whatever is still unused, so a study with unusual
+    # protocol naming still fills the tensor rather than feeding zeros.
+    if len(chosen) < max_series:
+        for row, _, _ in classified:
+            if len(chosen) >= max_series:
+                break
+            uid = str(row["SeriesInstanceUID"])
+            if uid in seen:
                 continue
             seen.add(uid)
             chosen.append(row)
@@ -399,6 +418,7 @@ def preprocess_study(
     pixels = np.zeros((max_series, n_slices, size, size), dtype=np.uint8)
     series_mask = np.zeros((max_series,), dtype=bool)
     series_uids: list[str | None] = [None] * max_series
+    planes: list[str] = ["unknown"] * max_series
 
     slot = 0
     for row in chosen:
@@ -410,9 +430,13 @@ def preprocess_study(
         pixels[slot] = vol
         series_mask[slot] = True
         series_uids[slot] = str(row["SeriesInstanceUID"])
+        plane, _ = classify_series_row(row)
+        planes[slot] = plane if plane in ("sagittal", "coronal", "axial") else "unknown"
         slot += 1
 
-    return StudyVolume(pixels=pixels, series_mask=series_mask, series_uids=series_uids)
+    return StudyVolume(
+        pixels=pixels, series_mask=series_mask, series_uids=series_uids, planes=planes
+    )
 
 
 def to_model_input(pixels: np.ndarray) -> np.ndarray:

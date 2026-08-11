@@ -10,12 +10,19 @@ import pandas as pd
 import torch
 from torch.utils.data import Dataset
 
+from augment import AugmentConfig, augment_study
 from config import PreprocessConfig
+from model import PLANE_IDS
 from preprocess import preprocess_study, to_model_input
 
 
 class StudyDataset(Dataset):
-    """One item per study. Yields the model input, targets and mask."""
+    """One item per study.
+
+    Yields the FULL series stack ``(S, T, 3, H, W)`` plus the series mask and
+    plane ids, so the same Dataset serves single-series (S=1) and multi-series
+    runs with no branching.
+    """
 
     def __init__(
         self,
@@ -24,22 +31,22 @@ class StudyDataset(Dataset):
         config: PreprocessConfig,
         targets: pd.DataFrame | None = None,
         mask: pd.DataFrame | None = None,
-        series_index: int = 0,
+        augment: AugmentConfig | None = None,
+        seed: int = 0,
     ):
         self.study_uids = [str(u) for u in study_uids]
         self.series_df = series_df
         self.config = config
         self.targets = targets
         self.mask = mask
-        # Phase 0 feeds one series to the model; the stacked form is still what
-        # preprocess_study returns. TODO(phase-2): consume all series slots.
-        self.series_index = series_index
+        self.augment = augment
+        self.seed = seed
 
     def __len__(self) -> int:
         return len(self.study_uids)
 
-    def volume(self, uid: str) -> np.ndarray:
-        study = preprocess_study(
+    def study(self, uid: str):
+        out = preprocess_study(
             uid,
             self.series_df,
             self.config.plane_prefs,
@@ -47,12 +54,28 @@ class StudyDataset(Dataset):
             self.config.size,
             self.config.max_series,
         )
-        assert study.pixels.ndim == 4, "preprocess_study must return the stacked form"
-        return study.pixels[self.series_index]
+        assert out.pixels.ndim == 4, "preprocess_study must return the stacked form"
+        return out
 
     def __getitem__(self, i: int):
         uid = self.study_uids[i]
-        x = torch.from_numpy(to_model_input(self.volume(uid)))
+        study = self.study(uid)
+        pixels = study.pixels
+
+        if self.augment is not None and self.augment.enabled:
+            # Seeded per (epoch-agnostic) item so a worker restart is harmless,
+            # but varied across items.
+            rng = np.random.default_rng((self.seed * 1_000_003 + i) % (2**32))
+            pixels = augment_study(pixels, rng, self.augment)
+
+        x = torch.from_numpy(
+            np.stack([to_model_input(pixels[s]) for s in range(pixels.shape[0])])
+        )  # (S, T, 3, H, W)
+        series_mask = torch.from_numpy(study.series_mask.astype(np.float32))
+        plane_ids = torch.tensor(
+            [PLANE_IDS.get(p, 0) for p in study.planes], dtype=torch.long
+        )
+
         n_targets = len(self.targets.columns) if self.targets is not None else 0
         if self.targets is None:
             y = torch.zeros(0)
@@ -66,4 +89,11 @@ class StudyDataset(Dataset):
                 if self.mask is not None
                 else np.ones(n_targets, dtype=np.float32)
             )
-        return {"x": x, "y": y, "mask": m, "study_uid": uid}
+        return {
+            "x": x,
+            "y": y,
+            "mask": m,
+            "series_mask": series_mask,
+            "plane_ids": plane_ids,
+            "study_uid": uid,
+        }

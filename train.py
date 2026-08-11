@@ -23,7 +23,9 @@ from torch.utils.data import DataLoader
 
 import config
 from config import ID_COLUMN, PreprocessConfig, RunConfig, TARGET_COLUMNS
-from data import StudyDataset, build_targets, load_tables
+from augment import AugmentConfig
+from data import build_targets, load_tables
+from dataset import StudyDataset
 from model import build_model, masked_bce_with_logits
 from preprocess import series_coverage
 from textlabel import coverage_report, label_reports
@@ -54,7 +56,11 @@ def predict(model, loader, device) -> tuple[np.ndarray, list[str]]:
     model.eval()
     probs, uids = [], []
     for batch in loader:
-        logits = model(batch["x"].to(device))
+        logits = model(
+            batch["x"].to(device),
+            series_mask=batch["series_mask"].to(device),
+            plane_ids=batch["plane_ids"].to(device),
+        )
         probs.append(torch.sigmoid(logits).float().cpu().numpy())
         uids.extend(batch["study_uid"])
     if not probs:
@@ -79,6 +85,11 @@ def train(
     num_workers: int = 0,
     columns: Sequence[str] | None = None,
     use_confidence_weights: bool = True,
+    plane_prefs: Sequence[str] | None = None,
+    augment: bool = True,
+    amp: bool = True,
+    finetune_gold_epochs: int = 0,
+    finetune_lr: float = 5e-5,
 ) -> dict:
     t0 = time.time()
     torch.manual_seed(seed)
@@ -101,7 +112,21 @@ def train(
     if tables.reports is not None:
         pseudo, _ = label_reports(tables.reports, columns=columns)
         print("pseudo-label coverage:\n", coverage_report(pseudo).to_string(index=False))
-    weights = config.PSEUDO_LABEL_WEIGHTS if use_confidence_weights else None
+    weights = None
+    if use_confidence_weights:
+        weights = dict(config.PSEUDO_LABEL_WEIGHTS)
+        # Fold in class balance measured on THIS run's pseudo-labels, so a
+        # column that degenerates to all-positive is silenced automatically
+        # rather than waiting for someone to notice it in the AUC table.
+        if pseudo is not None:
+            for col in columns:
+                if col not in pseudo.columns:
+                    continue
+                labeled = pseudo[col].notna().sum()
+                if not labeled:
+                    continue
+                rate = float((pseudo[col] == 1).sum()) / float(labeled)
+                weights[col] = weights.get(col, 1.0) * config.balance_factor(rate)
     targets, mask = build_targets(
         tables.study_uids, tables.gold, pseudo, columns, pseudo_weights=weights
     )
@@ -137,9 +162,13 @@ def train(
     train_uids = [u for u in train_uids if bool((mask.loc[u] > 0).any())]
     print(f"train studies: {len(train_uids)} | gold val studies: {len(val_uids)}")
 
-    pre = PreprocessConfig(
-        n_slices=n_slices, size=size, max_series=max_series
+    prefs = tuple(plane_prefs) if plane_prefs is not None else (
+        config.MULTI_PLANE_PREFS if max_series > 1 else config.DEFAULT_PLANE_PREFS
     )
+    pre = PreprocessConfig(
+        n_slices=n_slices, size=size, max_series=max_series, plane_prefs=prefs
+    )
+    print(f"plane prefs: {prefs} | max_series={max_series}")
 
     # Cheap, decode-free sanity check: if this ratio is low, series selection
     # (or the assumed <root>/<study>/<series>/ layout) doesn't match this
@@ -149,7 +178,10 @@ def train(
     print(f"series resolved: train {train_hits}/{train_n} | val {val_hits}/{val_n}")
     if val_n and val_hits < val_n:
         print(f"WARNING: {val_n - val_hits} val studies have no matching series -> zero-filled input")
-    train_ds = StudyDataset(train_uids, tables.series, pre, targets, mask)
+    aug_cfg = AugmentConfig(enabled=augment)
+    train_ds = StudyDataset(
+        train_uids, tables.series, pre, targets, mask, augment=aug_cfg, seed=seed
+    )
     val_ds = StudyDataset(val_uids, tables.series, pre, targets, mask)
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
@@ -160,23 +192,66 @@ def train(
 
     model = build_model(backbone=backbone, pretrained=pretrained).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    use_amp = bool(amp and device == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
+    steps = max(1, len(train_loader)) * max(1, epochs)
+    sched = torch.optim.lr_scheduler.OneCycleLR(
+        opt, max_lr=lr, total_steps=steps, pct_start=0.25
+    )
+
+    def run_epoch(loader, optimizer, scheduler, tag):
+        model.train()
+        losses = []
+        for batch in loader:
+            optimizer.zero_grad(set_to_none=True)
+            with torch.autocast("cuda", enabled=use_amp):
+                logits = model(
+                    batch["x"].to(device),
+                    series_mask=batch["series_mask"].to(device),
+                    plane_ids=batch["plane_ids"].to(device),
+                )
+                loss = masked_bce_with_logits(
+                    logits, batch["y"].to(device), batch["mask"].to(device)
+                )
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            if scheduler is not None:
+                scheduler.step()
+            losses.append(float(loss.detach()))
+        return float(np.mean(losses)) if losses else float("nan")
 
     history = []
     for epoch in range(epochs):
-        model.train()
-        losses = []
-        for batch in train_loader:
-            opt.zero_grad(set_to_none=True)
-            logits = model(batch["x"].to(device))
-            loss = masked_bce_with_logits(
-                logits, batch["y"].to(device), batch["mask"].to(device)
-            )
-            loss.backward()
-            opt.step()
-            losses.append(float(loss.detach()))
-        mean_loss = float(np.mean(losses)) if losses else float("nan")
+        mean_loss = run_epoch(train_loader, opt, sched, "pseudo")
         history.append({"epoch": epoch, "train_loss": mean_loss})
         print(f"epoch {epoch}: masked BCE {mean_loss:.4f}")
+
+    # ---- stage 2: fine-tune on gold only -----------------------------------
+    # Pseudo-labels teach the representation; the 41 gold studies correct it.
+    # Low LR and few epochs, or 41 studies will simply be memorised.
+    if finetune_gold_epochs > 0:
+        ft_uids = [u for u in train_uids if u in set(gold_uids)]
+        if ft_uids:
+            print(f"fine-tuning on {len(ft_uids)} gold studies for {finetune_gold_epochs} epochs")
+            gold_only_mask = mask.copy()
+            g_idx = tables.gold.set_index(tables.gold[ID_COLUMN].astype(str))
+            for col in columns:
+                if col in g_idx.columns:
+                    is_gold = g_idx[col].reindex(gold_only_mask.index).notna()
+                    gold_only_mask[col] = np.where(is_gold, 1.0, 0.0)
+            ft_ds = StudyDataset(
+                ft_uids, tables.series, pre, targets, gold_only_mask,
+                augment=aug_cfg, seed=seed + 1,
+            )
+            ft_loader = DataLoader(
+                ft_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
+            )
+            ft_opt = torch.optim.AdamW(model.parameters(), lr=finetune_lr, weight_decay=1e-4)
+            for e in range(finetune_gold_epochs):
+                fl = run_epoch(ft_loader, ft_opt, None, "gold")
+                history.append({"epoch": f"ft{e}", "train_loss": fl})
+                print(f"finetune {e}: masked BCE {fl:.4f}")
 
     # ---- gold-only validation ----------------------------------------------
     auc_table = pd.DataFrame(columns=["column", "n", "auc"])
@@ -233,6 +308,10 @@ def main() -> None:
     ap.add_argument("--no-pretrained", action="store_true", help="offline / tests")
     ap.add_argument("--num-workers", type=int, default=0)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--no-augment", action="store_true")
+    ap.add_argument("--no-amp", action="store_true")
+    ap.add_argument("--finetune-gold-epochs", type=int, default=0)
+    ap.add_argument("--val-fraction", type=float, default=0.3)
     args = ap.parse_args()
     train(
         data_dir=args.data_dir,
@@ -247,6 +326,10 @@ def main() -> None:
         pretrained=not args.no_pretrained,
         num_workers=args.num_workers,
         seed=args.seed,
+        augment=not args.no_augment,
+        amp=not args.no_amp,
+        finetune_gold_epochs=args.finetune_gold_epochs,
+        val_fraction=args.val_fraction,
     )
 
 

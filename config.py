@@ -103,6 +103,32 @@ def target_columns(sample_submission: str | Path | None = None) -> list[str]:
 # so the ordering below is: sagittal fluid-sensitive, then sagittal anything.
 DEFAULT_PLANE_PREFS: tuple[str, ...] = ("sagittal_fluid", "sagittal_any")
 
+# Multi-plane preference order. One series is taken per entry, so this yields
+# sagittal + coronal + axial rather than three sagittals. Findings are
+# plane-specific: MCL and the femorotibial compartments are coronal calls,
+# patellofemoral cartilage is axial, the cruciates and meniscal horns sagittal.
+MULTI_PLANE_PREFS: tuple[str, ...] = (
+    "sagittal_fluid",
+    "coronal_fluid",
+    "axial_fluid",
+    "sagittal_any",
+    "coronal_any",
+    "axial_any",
+)
+
+
+def balance_factor(positive_rate: float) -> float:
+    """Down-weight columns whose pseudo-labels are nearly all one class.
+
+    A column labeled 95% positive (Synovitis was 377/19) carries almost no
+    contrast: the model can satisfy the loss by predicting the majority and
+    still score AUC 0.5 - which is exactly what Synovitis did, coming back at
+    0.424, the only column to get worse. Peaks at 1.0 for a balanced column and
+    falls to 0 at either extreme.
+    """
+    p = min(max(float(positive_rate), 0.0), 1.0)
+    return 4.0 * p * (1.0 - p)
+
 
 @dataclass(frozen=True)
 class PreprocessConfig:
