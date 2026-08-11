@@ -78,6 +78,7 @@ def train(
     device: str | None = None,
     num_workers: int = 0,
     columns: Sequence[str] | None = None,
+    use_confidence_weights: bool = True,
 ) -> dict:
     t0 = time.time()
     torch.manual_seed(seed)
@@ -100,8 +101,16 @@ def train(
     if tables.reports is not None:
         pseudo, _ = label_reports(tables.reports, columns=columns)
         print("pseudo-label coverage:\n", coverage_report(pseudo).to_string(index=False))
-    targets, mask = build_targets(tables.study_uids, tables.gold, pseudo, columns)
-    print(f"labeled cells: {int(mask.to_numpy().sum())} / {mask.size}")
+    weights = config.PSEUDO_LABEL_WEIGHTS if use_confidence_weights else None
+    targets, mask = build_targets(
+        tables.study_uids, tables.gold, pseudo, columns, pseudo_weights=weights
+    )
+    n_labeled = int((mask.to_numpy() > 0).sum())
+    print(f"labeled cells: {n_labeled} / {mask.size}")
+    if weights is not None:
+        print("per-column loss weight (from measured labeler precision):")
+        for col in columns:
+            print(f"  {col:>18}: {weights.get(col, 1.0):.2f}")
 
     # ---- split: validate on gold only --------------------------------------
     # "Gold" means at least one non-null label in train.csv, NOT mere presence
@@ -125,7 +134,7 @@ def train(
     val_uids = gold_shuffled[:n_val]
     train_uids = [u for u in tables.study_uids if u not in set(val_uids)]
     # Keep only studies that actually carry at least one label.
-    train_uids = [u for u in train_uids if bool(mask.loc[u].any())]
+    train_uids = [u for u in train_uids if bool((mask.loc[u] > 0).any())]
     print(f"train studies: {len(train_uids)} | gold val studies: {len(val_uids)}")
 
     pre = PreprocessConfig(
@@ -184,7 +193,7 @@ def train(
                 "before trusting these numbers."
             )
         yt = targets.loc[uids, columns].to_numpy(dtype=float)
-        mk = mask.loc[uids, columns].to_numpy(dtype=bool)
+        mk = mask.loc[uids, columns].to_numpy(dtype=float) > 0
         auc_table = per_column_auc(np.nan_to_num(yt), probs, mk, columns)
         aucs = auc_table["auc"].to_numpy(dtype=float)
         # With 58 gold studies most columns will be single-class in the fold and
@@ -202,7 +211,7 @@ def train(
         "per_column_auc": auc_table.to_dict("records"),
         "n_train_studies": len(train_uids),
         "n_val_gold_studies": len(val_uids),
-        "labeled_cells": int(mask.to_numpy().sum()),
+        "labeled_cells": n_labeled,
         "seconds": round(time.time() - t0, 1),
     }
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")

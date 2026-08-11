@@ -36,10 +36,42 @@ N_TARGETS = len(TARGET_COLUMNS)
 
 ID_COLUMN = "StudyInstanceUID"
 
-# Columns the Phase-0 text pseudo-labeler is allowed to touch. Precision first:
-# every other column stays NaN and is masked out of the loss.
-# TODO(phase-1): extend to the remaining 10 columns via a multilingual encoder.
+# Columns the Phase-0 text pseudo-labeler was allowed to touch. Phase 1 widened
+# this to all 12; the constant is kept for the Phase-0 regression tests.
 PSEUDO_LABEL_COLUMNS: tuple[str, ...] = ("Effusion", "Fracture")
+
+# MEASURED positive-class precision of the text labeler against the 58 gold
+# studies (evaluate_labeler.py, commit 4fd4dd2). These are not guesses - rerun
+# the evaluator and update them whenever the lexicon changes.
+#
+# Used to WEIGHT the loss per column rather than to include/exclude columns
+# outright: a column labeled at 0.67 precision across 866 studies still carries
+# more signal than 41 gold studies alone, but it should not shout as loudly as
+# ACL at 0.90. Gold labels always carry weight 1.0 regardless.
+PSEUDO_LABEL_PRECISION: dict[str, float] = {
+    "ACL": 0.90,
+    "MCL": 0.67,
+    "Medial Meniscus": 0.78,
+    "Lateral Meniscus": 0.89,
+    "Medial OA": 0.67,
+    "Lateral OA": 0.67,
+    "PF OA": 0.67,
+    "Effusion": 0.75,
+    "Synovitis": 0.70,
+    "Baker's": 0.67,
+    "Contusion": 0.56,  # weakest column; three lexicon passes failed to lift it
+    "Fracture": 0.875,
+}
+
+# Map precision -> loss weight. 0.5 precision is a coin flip and earns weight 0;
+# perfect precision earns 1.0. Linear in between.
+def confidence_weight(precision: float) -> float:
+    return max(0.0, min(1.0, (precision - 0.5) * 2.0))
+
+
+PSEUDO_LABEL_WEIGHTS: dict[str, float] = {
+    col: confidence_weight(p) for col, p in PSEUDO_LABEL_PRECISION.items()
+}
 
 
 def target_columns(sample_submission: str | Path | None = None) -> list[str]:

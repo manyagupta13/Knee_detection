@@ -84,15 +84,23 @@ def build_targets(
     gold: pd.DataFrame | None,
     pseudo: pd.DataFrame | None,
     columns: Sequence[str] = TARGET_COLUMNS,
+    pseudo_weights: dict[str, float] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Gold UNION pseudo-labels. Gold always wins on conflict.
 
-    Returns ``(targets, mask)`` aligned to ``study_uids``; mask is True exactly
-    where a label exists, which is what the masked BCE keys off.
+    Returns ``(targets, weights)`` aligned to ``study_uids``. ``weights`` is 0
+    where there is no label, 1.0 for gold, and - when ``pseudo_weights`` is
+    supplied - the per-column confidence for text-derived labels.
+
+    The masked BCE multiplies by this and normalizes by its sum, so a binary
+    mask and a weight matrix are the same object; passing measured per-column
+    precision here is what turns "which columns do we trust" from an
+    include/exclude decision into a graded one.
     """
     columns = list(columns)
     index = pd.Index([str(u) for u in study_uids], name=ID_COLUMN)
     targets = pd.DataFrame(np.nan, index=index, columns=columns, dtype=float)
+    from_gold = pd.DataFrame(False, index=index, columns=columns)
 
     if pseudo is not None and len(pseudo):
         p = pseudo.reindex(index=index, columns=columns)
@@ -103,8 +111,18 @@ def build_targets(
             index=index, columns=columns
         )
         targets = targets.where(g.isna(), g)
+        from_gold = g.notna()
 
-    return targets, targets.notna()
+    labeled = targets.notna()
+    if pseudo_weights is None:
+        return targets, labeled
+
+    weights = pd.DataFrame(0.0, index=index, columns=columns, dtype=float)
+    for col in columns:
+        w = float(pseudo_weights.get(col, 1.0))
+        weights[col] = np.where(labeled[col], w, 0.0)
+        weights[col] = np.where(from_gold[col], 1.0, weights[col])
+    return targets, weights
 
 
 def __getattr__(name: str):
