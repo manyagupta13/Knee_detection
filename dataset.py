@@ -11,6 +11,7 @@ import torch
 from torch.utils.data import Dataset
 
 from augment import AugmentConfig, augment_study
+from cache import StudyCache
 from config import PreprocessConfig
 from model import PLANE_IDS
 from preprocess import preprocess_study, to_model_input
@@ -33,6 +34,7 @@ class StudyDataset(Dataset):
         mask: pd.DataFrame | None = None,
         augment: AugmentConfig | None = None,
         seed: int = 0,
+        cache: StudyCache | None = None,
     ):
         self.study_uids = [str(u) for u in study_uids]
         self.series_df = series_df
@@ -41,11 +43,16 @@ class StudyDataset(Dataset):
         self.mask = mask
         self.augment = augment
         self.seed = seed
+        # Read-through decode cache. Augmentation runs AFTER this, on the uint8
+        # volume, so caching cannot reduce augmentation diversity.
+        self.cache = cache
 
     def __len__(self) -> int:
         return len(self.study_uids)
 
     def study(self, uid: str):
+        if self.cache is not None and self.cache.enabled:
+            return self.cache.get(uid, self.series_df)
         out = preprocess_study(
             uid,
             self.series_df,

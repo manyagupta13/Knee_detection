@@ -24,6 +24,7 @@ from torch.utils.data import DataLoader
 import config
 from config import ID_COLUMN, PreprocessConfig, RunConfig, TARGET_COLUMNS
 from augment import AugmentConfig
+from cache import build_cache
 from data import build_targets, load_tables
 from dataset import StudyDataset
 from model import build_model, masked_bce_with_logits
@@ -90,6 +91,9 @@ def train(
     amp: bool = True,
     finetune_gold_epochs: int = 0,
     finetune_lr: float = 5e-5,
+    cache_dir: str | Path | None = None,
+    cache_workers: int = 4,
+    pseudo_labels: pd.DataFrame | None = None,
 ) -> dict:
     t0 = time.time()
     torch.manual_seed(seed)
@@ -109,7 +113,11 @@ def train(
 
     # ---- labels: gold UNION high-precision pseudo-labels --------------------
     pseudo = None
-    if tables.reports is not None:
+    if pseudo_labels is not None:
+        pseudo = pseudo_labels.reindex(columns=columns)
+        pseudo.index = pseudo.index.astype(str)
+        print(f"using supplied pseudo-labels: {int(pseudo.notna().to_numpy().sum())} cells")
+    elif tables.reports is not None:
         pseudo, _ = label_reports(tables.reports, columns=columns)
         print("pseudo-label coverage:\n", coverage_report(pseudo).to_string(index=False))
     weights = None
@@ -178,11 +186,19 @@ def train(
     print(f"series resolved: train {train_hits}/{train_n} | val {val_hits}/{val_n}")
     if val_n and val_hits < val_n:
         print(f"WARNING: {val_n - val_hits} val studies have no matching series -> zero-filled input")
+    study_cache = None
+    if cache_dir is not None:
+        study_cache = build_cache(
+            list(dict.fromkeys(train_uids + val_uids)),
+            tables.series, pre, cache_dir, num_workers=cache_workers,
+        )
+
     aug_cfg = AugmentConfig(enabled=augment)
     train_ds = StudyDataset(
-        train_uids, tables.series, pre, targets, mask, augment=aug_cfg, seed=seed
+        train_uids, tables.series, pre, targets, mask,
+        augment=aug_cfg, seed=seed, cache=study_cache,
     )
-    val_ds = StudyDataset(val_uids, tables.series, pre, targets, mask)
+    val_ds = StudyDataset(val_uids, tables.series, pre, targets, mask, cache=study_cache)
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
     )
@@ -242,7 +258,7 @@ def train(
                     gold_only_mask[col] = np.where(is_gold, 1.0, 0.0)
             ft_ds = StudyDataset(
                 ft_uids, tables.series, pre, targets, gold_only_mask,
-                augment=aug_cfg, seed=seed + 1,
+                augment=aug_cfg, seed=seed + 1, cache=study_cache,
             )
             ft_loader = DataLoader(
                 ft_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
@@ -312,6 +328,7 @@ def main() -> None:
     ap.add_argument("--no-amp", action="store_true")
     ap.add_argument("--finetune-gold-epochs", type=int, default=0)
     ap.add_argument("--val-fraction", type=float, default=0.3)
+    ap.add_argument("--cache-dir", default=None)
     args = ap.parse_args()
     train(
         data_dir=args.data_dir,
@@ -330,6 +347,7 @@ def main() -> None:
         amp=not args.no_amp,
         finetune_gold_epochs=args.finetune_gold_epochs,
         val_fraction=args.val_fraction,
+        cache_dir=args.cache_dir,
     )
 
 
