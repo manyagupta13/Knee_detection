@@ -125,6 +125,81 @@ class KneeModel(nn.Module):
         return logits
 
 
+class FeatureHead(nn.Module):
+    """Attention pooling + 12 heads over PRE-EXTRACTED slice embeddings.
+
+    Identical pooling to KneeModel, with the backbone removed: slices -> gated
+    attention -> plane embedding -> series gated attention -> heads. Because the
+    features are frozen and cached, an epoch costs seconds, so k-fold, long
+    schedules and hyper-parameter search all become affordable.
+
+    Feature-space augmentation replaces the pixel-space augmentation a frozen
+    embedding cannot receive: dropping whole slices still simulates missing
+    tissue, and gaussian noise still regularises.
+    """
+
+    def __init__(
+        self,
+        feat_dim: int,
+        n_targets: int = N_TARGETS,
+        hidden_dim: int = 256,
+        dropout: float = 0.3,
+        slice_dropout: float = 0.1,
+        feature_noise: float = 0.05,
+    ):
+        super().__init__()
+        self.feat_dim = feat_dim
+        self.proj = nn.Sequential(
+            nn.LayerNorm(feat_dim),
+            nn.Linear(feat_dim, hidden_dim),
+            nn.GELU(),
+        )
+        self.slice_pool = GatedAttentionPool(hidden_dim)
+        self.series_pool = GatedAttentionPool(hidden_dim)
+        self.plane_emb = nn.Embedding(N_PLANES, hidden_dim)
+        nn.init.zeros_(self.plane_emb.weight)
+        self.dropout = nn.Dropout(dropout)
+        self.head = nn.Linear(hidden_dim, n_targets)
+        self.slice_dropout = slice_dropout
+        self.feature_noise = feature_noise
+
+    def forward(
+        self,
+        feats: torch.Tensor,
+        series_mask: torch.Tensor | None = None,
+        plane_ids: torch.Tensor | None = None,
+        return_attention: bool = False,
+    ):
+        """feats: (B, S, T, D) -> logits (B, n_targets)."""
+        if feats.ndim == 3:      # (B, T, D) single series
+            feats = feats.unsqueeze(1)
+        if feats.ndim != 4:
+            raise ValueError(f"expected (B, S, T, D), got {tuple(feats.shape)}")
+        b, s, t, _ = feats.shape
+
+        if self.training and self.feature_noise > 0:
+            feats = feats + torch.randn_like(feats) * self.feature_noise
+
+        h = self.proj(feats).view(b * s, t, -1)
+
+        slice_mask = None
+        if self.training and self.slice_dropout > 0:
+            keep = torch.rand(b * s, t, device=feats.device) > self.slice_dropout
+            keep[~keep.any(dim=1)] = True      # never drop an entire series
+            slice_mask = keep
+
+        pooled, slice_attn = self.slice_pool(h, mask=slice_mask)
+        series_feat = pooled.view(b, s, -1)
+        if plane_ids is not None:
+            series_feat = series_feat + self.plane_emb(plane_ids.long())
+
+        out, series_attn = self.series_pool(series_feat, mask=series_mask)
+        logits = self.head(self.dropout(out))
+        if return_attention:
+            return logits, {"slice": slice_attn.view(b, s, t), "series": series_attn}
+        return logits
+
+
 def masked_bce_with_logits(
     logits: torch.Tensor,
     targets: torch.Tensor,
