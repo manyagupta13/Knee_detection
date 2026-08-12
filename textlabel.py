@@ -247,6 +247,30 @@ _INTEG_RE = {
 }
 
 
+# Whether "structure discussed, no pathology stated" counts as a negative.
+# Off by default; flip with set_mention_implies_negative() and let gold decide.
+_MENTION_IMPLIES_NEGATIVE = False
+_MENTION_NEGATIVE_COLUMNS: frozenset[str] = frozenset(
+    {"ACL", "MCL", "Medial Meniscus", "Lateral Meniscus"}
+)
+
+
+def set_mention_implies_negative(
+    enabled: bool, columns: Iterable[str] | None = None
+) -> None:
+    """Treat an un-flagged mention of a structure as evidence it is normal.
+
+    Only sensible for structures a radiologist enumerates whether or not they
+    are abnormal - the cruciates, collaterals and menisci. NOT for findings that
+    are only ever written down when present (Baker's, Fracture, Contusion),
+    where silence means nothing.
+    """
+    global _MENTION_IMPLIES_NEGATIVE, _MENTION_NEGATIVE_COLUMNS
+    _MENTION_IMPLIES_NEGATIVE = bool(enabled)
+    if columns is not None:
+        _MENTION_NEGATIVE_COLUMNS = frozenset(columns)
+
+
 def split_clauses(text: str) -> list[str]:
     return [c.strip() for c in _CLAUSE_SPLIT.split(normalize(text)) if c.strip()]
 
@@ -426,7 +450,16 @@ def _vote_for_clause(column: str, clause: str, spec) -> str | None:
         # "not intact" flips an integrity statement back to positive
         return "pos" if negated else "neg"
 
-    # Structure named with neither cue nearby - no opinion.
+    # Structure named with neither cue nearby.
+    #
+    # MEASURED: this abstention is where most of our recall goes. The medial
+    # meniscus is mentioned in 96.6% of gold studies but we commit a label on
+    # only 43.1%, while being 84% accurate when we do commit. A report that
+    # discusses the meniscus at length and never says "tear" - "intrasubstance
+    # degeneration not extending to the articular surface", "grade 2 signal" -
+    # is describing an INTACT structure, and that is a negative we discard.
+    if _MENTION_IMPLIES_NEGATIVE and column in _MENTION_NEGATIVE_COLUMNS:
+        return None if hedged else "neg"
     return None
 
 

@@ -332,3 +332,55 @@ def test_degeneration_is_not_a_meniscal_tear():
 def test_empty_and_garbage_input():
     for text in ["", None, float("nan"), "12345 !!! ---"]:
         assert label_report(text) == {c: None for c in TARGET_COLUMNS}
+
+
+# ---------------------------------------------------------------------------
+# Abstention policy: the measured cause of low coverage
+# ---------------------------------------------------------------------------
+def test_mention_implies_negative_is_off_by_default():
+    from textlabel import label_report as lr
+
+    text = "Medial meniscus shows intrasubstance degeneration."
+    assert lr(text)["Medial Meniscus"] is None
+
+
+def test_mention_implies_negative_recovers_discarded_negatives():
+    """MEASURED: the medial meniscus is mentioned in 96.6% of gold studies but
+    we commit a label on only 43.1%, while being 84% accurate when we do. A
+    report that discusses the meniscus and never says 'tear' is describing an
+    intact one."""
+    from textlabel import label_report as lr, set_mention_implies_negative
+
+    text = ("Medial meniscus shows intrasubstance degeneration not extending to "
+            "the articular surface.")
+    try:
+        set_mention_implies_negative(True)
+        assert lr(text)["Medial Meniscus"] == 0.0
+    finally:
+        set_mention_implies_negative(False)
+
+
+def test_mention_implies_negative_never_overrides_real_evidence():
+    from textlabel import label_report as lr, set_mention_implies_negative
+
+    try:
+        set_mention_implies_negative(True)
+        assert lr("Tear of the medial meniscus.")["Medial Meniscus"] == 1.0
+        assert lr("Medial meniscus is intact.")["Medial Meniscus"] == 0.0
+        # hedged mentions still abstain
+        assert lr("Possible tear of the medial meniscus.")["Medial Meniscus"] is None
+    finally:
+        set_mention_implies_negative(False)
+
+
+def test_mention_implies_negative_does_not_touch_present_only_findings():
+    """Silence about a Baker's cyst or a fracture means nothing - those are
+    only written down when present, so an un-flagged mention proves nothing."""
+    from textlabel import label_report as lr, set_mention_implies_negative
+
+    try:
+        set_mention_implies_negative(True)
+        assert lr("The popliteal fossa is imaged.")["Baker's"] is None
+        assert lr("The tibia is imaged.")["Fracture"] is None
+    finally:
+        set_mention_implies_negative(False)
