@@ -248,11 +248,23 @@ _INTEG_RE = {
 
 
 # Whether "structure discussed, no pathology stated" counts as a negative.
-# Off by default; flip with set_mention_implies_negative() and let gold decide.
-_MENTION_IMPLIES_NEGATIVE = False
-_MENTION_NEGATIVE_COLUMNS: frozenset[str] = frozenset(
-    {"ACL", "MCL", "Medial Meniscus", "Lateral Meniscus"}
-)
+#
+# MEASURED per column against gold, and the answer is ACL only:
+#
+#   column             agreement        recall        coverage
+#   ACL                0.929 -> 0.943   1.00 -> 0.94  1137 -> 1941   KEEP
+#   MCL                0.875 -> 0.828   1.00 -> 0.40   834 -> 1913   reject
+#   Medial Meniscus    0.840 -> 0.767   1.00 -> 0.71  1240 -> 1827   reject
+#   Lateral Meniscus   0.900 -> 0.719   0.89 -> 0.47  1460 -> 2137   reject
+#
+# The collapsing recall is the tell: on the meniscus and collateral columns our
+# tear-cue vocabulary misses real tears, so the rule converts a harmless
+# abstention into a confident FALSE NEGATIVE - more than half of gold-positive
+# lateral meniscus tears end up labeled 0. ACL survives because its tear
+# vocabulary is well covered, and there precision actually rose to 0.938 while
+# coverage grew 71%.
+_MENTION_IMPLIES_NEGATIVE = True
+_MENTION_NEGATIVE_COLUMNS: frozenset[str] = frozenset({"ACL"})
 
 
 def set_mention_implies_negative(

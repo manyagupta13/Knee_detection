@@ -337,40 +337,30 @@ def test_empty_and_garbage_input():
 # ---------------------------------------------------------------------------
 # Abstention policy: the measured cause of low coverage
 # ---------------------------------------------------------------------------
-def test_mention_implies_negative_is_off_by_default():
+def test_mention_implies_negative_is_enabled_for_acl_only():
+    """MEASURED per column. On ACL it lifted agreement 0.929 -> 0.943 while
+    growing coverage 71%. On the meniscus and collateral columns recall
+    COLLAPSED (lateral meniscus 0.89 -> 0.47) because our tear-cue vocabulary
+    misses real tears, turning harmless abstentions into confident false
+    negatives."""
     from textlabel import label_report as lr
 
-    text = "Medial meniscus shows intrasubstance degeneration."
-    assert lr(text)["Medial Meniscus"] is None
-
-
-def test_mention_implies_negative_recovers_discarded_negatives():
-    """MEASURED: the medial meniscus is mentioned in 96.6% of gold studies but
-    we commit a label on only 43.1%, while being 84% accurate when we do. A
-    report that discusses the meniscus and never says 'tear' is describing an
-    intact one."""
-    from textlabel import label_report as lr, set_mention_implies_negative
-
-    text = ("Medial meniscus shows intrasubstance degeneration not extending to "
-            "the articular surface.")
-    try:
-        set_mention_implies_negative(True)
-        assert lr(text)["Medial Meniscus"] == 0.0
-    finally:
-        set_mention_implies_negative(False)
+    assert lr("The anterior cruciate ligament is visualized.")["ACL"] == 0.0
+    assert lr("The lateral meniscus is visualized.")["Lateral Meniscus"] is None
+    assert lr("Medial meniscus shows intrasubstance degeneration.")["Medial Meniscus"] is None
 
 
 def test_mention_implies_negative_never_overrides_real_evidence():
     from textlabel import label_report as lr, set_mention_implies_negative
 
     try:
-        set_mention_implies_negative(True)
+        set_mention_implies_negative(True, ["ACL", "Medial Meniscus"])
         assert lr("Tear of the medial meniscus.")["Medial Meniscus"] == 1.0
         assert lr("Medial meniscus is intact.")["Medial Meniscus"] == 0.0
         # hedged mentions still abstain
         assert lr("Possible tear of the medial meniscus.")["Medial Meniscus"] is None
     finally:
-        set_mention_implies_negative(False)
+        set_mention_implies_negative(True, ["ACL"])
 
 
 def test_mention_implies_negative_does_not_touch_present_only_findings():
@@ -379,8 +369,9 @@ def test_mention_implies_negative_does_not_touch_present_only_findings():
     from textlabel import label_report as lr, set_mention_implies_negative
 
     try:
-        set_mention_implies_negative(True)
+        set_mention_implies_negative(True, ["ACL", "Baker's", "Fracture"])
+        # even when opted in, these have no "structure" pattern to anchor on
         assert lr("The popliteal fossa is imaged.")["Baker's"] is None
         assert lr("The tibia is imaged.")["Fracture"] is None
     finally:
-        set_mention_implies_negative(False)
+        set_mention_implies_negative(True, ["ACL"])

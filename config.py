@@ -41,7 +41,7 @@ ID_COLUMN = "StudyInstanceUID"
 PSEUDO_LABEL_COLUMNS: tuple[str, ...] = ("Effusion", "Fracture")
 
 # MEASURED positive-class precision of the text labeler against the 58 gold
-# studies (evaluate_labeler.py, commit 4fd4dd2). These are not guesses - rerun
+# studies (evaluate_labeler.py, latest run). These are not guesses - rerun
 # the evaluator and update them whenever the lexicon changes.
 #
 # Used to WEIGHT the loss per column rather than to include/exclude columns
@@ -49,7 +49,7 @@ PSEUDO_LABEL_COLUMNS: tuple[str, ...] = ("Effusion", "Fracture")
 # more signal than 41 gold studies alone, but it should not shout as loudly as
 # ACL at 0.90. Gold labels always carry weight 1.0 regardless.
 PSEUDO_LABEL_PRECISION: dict[str, float] = {
-    "ACL": 0.90,
+    "ACL": 0.94,   # with mention-implies-negative enabled for this column
     "MCL": 0.67,
     "Medial Meniscus": 0.78,
     "Lateral Meniscus": 0.89,
