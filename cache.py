@@ -69,6 +69,7 @@ class StudyCache:
                 pixels = z["pixels"]
                 series_mask = z["series_mask"].astype(bool)
                 planes = [CODE_PLANES.get(int(c), "unknown") for c in z["planes"]]
+                lat = [None if v == "" else str(v) for v in z["laterality"]]
         except Exception:
             return None  # a truncated file must not kill the run
         expected = (
@@ -84,6 +85,7 @@ class StudyCache:
             series_mask=series_mask,
             series_uids=[None] * len(series_mask),
             planes=planes,
+            laterality=lat,
         )
 
     def store(self, study_uid: str, study: StudyVolume) -> None:
@@ -97,6 +99,9 @@ class StudyCache:
             pixels=study.pixels,
             series_mask=study.series_mask,
             planes=np.array([PLANE_CODES.get(p, 0) for p in study.planes], dtype=np.int8),
+            laterality=np.array(
+                [("" if v is None else str(v)) for v in study.laterality], dtype="<U1"
+            ),
         )
         tmp.replace(path)  # atomic, so a killed session leaves no half-file
 
@@ -112,6 +117,7 @@ class StudyCache:
             self.config.n_slices,
             self.config.size,
             self.config.max_series,
+            canonicalize=self.config.canonicalize,
         )
         self.store(study_uid, study)
         return study
@@ -184,4 +190,5 @@ def _decode_one(uid: str, study_series: pd.DataFrame, config: PreprocessConfig):
         config.n_slices,
         config.size,
         config.max_series,
+        canonicalize=config.canonicalize,
     )

@@ -140,6 +140,10 @@ class PreprocessConfig:
     max_series: int = 1  # TODO(phase-2): raise for multi-series fusion
     plane_prefs: tuple[str, ...] = DEFAULT_PLANE_PREFS
     clip_percentiles: tuple[float, float] = (1.0, 99.0)
+    # Mirror left knees into the right-knee frame so the model learns each
+    # finding once instead of twice. Changes the pixels, so it MUST be part of
+    # the cache key - hence it lives here, not as a loose function argument.
+    canonicalize: bool = True
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -163,6 +167,7 @@ class PreprocessConfig:
             max_series=int(d["max_series"]),
             plane_prefs=tuple(d["plane_prefs"]),
             clip_percentiles=tuple(float(x) for x in d["clip_percentiles"]),
+            canonicalize=bool(d.get("canonicalize", True)),
         )
 
 
@@ -173,12 +178,16 @@ class RunConfig:
     preprocess: PreprocessConfig = field(default_factory=PreprocessConfig)
     backbone: str = "efficientnet_b0"
     target_columns: Sequence[str] = TARGET_COLUMNS
+    # "2.5d" stacks adjacent slices as channels; "grey" replicates one slice.
+    # Saved with the weights so inference cannot silently use the other one.
+    input_mode: str = "2.5d"
 
     def to_dict(self) -> dict:
         return {
             "preprocess": self.preprocess.to_dict(),
             "backbone": self.backbone,
             "target_columns": list(self.target_columns),
+            "input_mode": self.input_mode,
         }
 
     def save(self, path: str | Path) -> None:
@@ -191,4 +200,5 @@ class RunConfig:
             preprocess=PreprocessConfig.from_dict(d["preprocess"]),
             backbone=d["backbone"],
             target_columns=list(d["target_columns"]),
+            input_mode=d.get("input_mode", "grey"),
         )

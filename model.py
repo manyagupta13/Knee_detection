@@ -73,6 +73,21 @@ class KneeModel(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.head = nn.Linear(feat_dim, n_targets)
 
+    def set_grad_checkpointing(self, enable: bool = True) -> bool:
+        """Trade ~30% speed for a large memory saving.
+
+        Activation memory scales with B*S*T images per step - at 3 series x 24
+        slices that is 72 images per study, which OOMs a 16GB card long before
+        the batch size is interesting. Checkpointing is what makes more slices
+        affordable, and slice count matters: sampling 12 of 40 slices can skip a
+        focal fracture entirely.
+        """
+        try:
+            self.backbone.set_grad_checkpointing(enable)
+            return True
+        except (AttributeError, NotImplementedError):
+            return False
+
     def forward(
         self,
         x: torch.Tensor,

@@ -63,12 +63,14 @@ class StudyVolume(NamedTuple):
     series_mask: bool,  shape (max_series,) - True where a real series was found
     series_uids: list[str | None], length max_series
     planes:      plane of each slot, for the model's plane embedding
+    laterality:  detected knee side per slot (None when undeterminable)
     """
 
     pixels: np.ndarray
     series_mask: np.ndarray
     series_uids: list[str | None]
     planes: list[str]  # "sagittal"/"coronal"/"axial"/"unknown", per slot
+    laterality: list[str | None]  # "L"/"R"/None, per slot
 
 
 def _norm_text(value) -> str:
@@ -196,6 +198,77 @@ def _list_dicoms(series_dir: str | Path) -> list[Path]:
     if not d.is_dir():
         return []
     return sorted(p for p in d.iterdir() if p.is_file() and not p.name.startswith("."))
+
+
+def detect_laterality(ds) -> str | None:
+    """'L' / 'R' / None for one DICOM header.
+
+    Prefers the explicit laterality tags; falls back to the sign of the x
+    coordinate of ImagePositionPatient, since patient-space x increases toward
+    the patient's LEFT in the LPS convention a knee study is acquired in.
+    """
+    for tag in ("ImageLaterality", "Laterality"):
+        value = getattr(ds, tag, None)
+        if value is not None:
+            text = str(value).strip().upper()
+            if text in ("L", "R"):
+                return text
+            if text in ("LEFT", "RIGHT"):
+                return text[0]
+
+    body = str(getattr(ds, "BodyPartExamined", "") or "").upper()
+    if "LEFT" in body:
+        return "L"
+    if "RIGHT" in body:
+        return "R"
+
+    ipp = getattr(ds, "ImagePositionPatient", None)
+    if ipp is not None and len(ipp) == 3:
+        try:
+            x = float(ipp[0])
+        except (TypeError, ValueError):
+            return None
+        # Knees sit well off midline; a few cm of offset is enough to call it.
+        if abs(x) > 20.0:
+            return "L" if x > 0 else "R"
+    return None
+
+
+def _peek_laterality(series_dir: str | Path) -> str | None:
+    files = _list_dicoms(series_dir)
+    if not files:
+        return None
+    try:
+        ds = pydicom.dcmread(str(files[0]), stop_before_pixels=True, force=True)
+    except Exception:
+        return None
+    return detect_laterality(ds)
+
+
+def canonicalize_laterality(
+    volume: np.ndarray, plane: str, side: str | None, canonical: str = "R"
+) -> np.ndarray:
+    """Put both knees in one frame so the model learns each finding once.
+
+    The operation depends on the plane, which is the part that is easy to get
+    wrong:
+
+      * SAGITTAL - the medial/lateral axis is the SLICE axis, so mirroring means
+        reversing slice order. An in-plane flip here would wrongly mirror
+        anterior/posterior instead.
+      * CORONAL / AXIAL - the medial/lateral axis is in-plane (image columns),
+        so mirroring is a horizontal flip.
+
+    A no-op when the side is unknown, which keeps this strictly safe: worst case
+    we do nothing, never something wrong.
+    """
+    if side is None or side == canonical:
+        return volume
+    if plane == "sagittal":
+        return volume[::-1].copy()
+    if plane in ("coronal", "axial"):
+        return volume[:, :, ::-1].copy()
+    return volume
 
 
 def _peek_iop(series_dir: str | Path) -> list[float] | None:
@@ -401,6 +474,7 @@ def preprocess_study(
     n_slices: int,
     size: int,
     max_series: int,
+    canonicalize: bool = True,
 ) -> StudyVolume:
     """Preprocess one study into the stacked multi-series form.
 
@@ -419,34 +493,54 @@ def preprocess_study(
     series_mask = np.zeros((max_series,), dtype=bool)
     series_uids: list[str | None] = [None] * max_series
     planes: list[str] = ["unknown"] * max_series
+    laterality: list[str | None] = [None] * max_series
 
     slot = 0
     for row in chosen:
         if slot >= max_series:
             break
-        vol = preprocess_series(row.get("series_dir", ""), n_slices=n_slices, size=size)
+        series_dir = row.get("series_dir", "")
+        vol = preprocess_series(series_dir, n_slices=n_slices, size=size)
         if vol is None:
             continue
+        plane, _ = classify_series_row(row)
+        plane = plane if plane in ("sagittal", "coronal", "axial") else "unknown"
+        side = _peek_laterality(series_dir) if canonicalize else None
+        if canonicalize:
+            vol = canonicalize_laterality(vol, plane, side)
         pixels[slot] = vol
         series_mask[slot] = True
         series_uids[slot] = str(row["SeriesInstanceUID"])
-        plane, _ = classify_series_row(row)
-        planes[slot] = plane if plane in ("sagittal", "coronal", "axial") else "unknown"
+        planes[slot] = plane
+        laterality[slot] = side
         slot += 1
 
     return StudyVolume(
-        pixels=pixels, series_mask=series_mask, series_uids=series_uids, planes=planes
+        pixels=pixels, series_mask=series_mask, series_uids=series_uids,
+        planes=planes, laterality=laterality,
     )
 
 
-def to_model_input(pixels: np.ndarray) -> np.ndarray:
+def to_model_input(pixels: np.ndarray, mode: str = "2.5d") -> np.ndarray:
     """(n_slices, H, W) uint8 -> (n_slices, 3, H, W) float32 in [0, 1].
 
-    Phase 0 replicates the grey channel. TODO(phase-3): stack 3 adjacent slices
-    as channels (2.5D) instead of replicating.
+    ``mode="2.5d"`` stacks slices (i-1, i, i+1) as the three channels, giving
+    every position local through-plane context for FREE - identical tensor
+    shape, identical FLOPs, and an ImageNet backbone that already expects three
+    correlated channels. Replicating one slice three times (``mode="grey"``,
+    the Phase-0 behaviour) simply wastes two thirds of the input.
+
+    Edges clamp rather than wrap, so the first and last slice repeat a neighbour
+    instead of pulling in the opposite end of the knee.
     """
     x = pixels.astype(np.float32) / 255.0
-    return np.repeat(x[:, None, :, :], 3, axis=1)
+    if mode == "grey":
+        return np.repeat(x[:, None, :, :], 3, axis=1)
+    if x.shape[0] == 1:
+        return np.repeat(x[:, None, :, :], 3, axis=1)
+    prev = np.concatenate([x[:1], x[:-1]], axis=0)
+    nxt = np.concatenate([x[1:], x[-1:]], axis=0)
+    return np.stack([prev, x, nxt], axis=1)
 
 
 def series_coverage(

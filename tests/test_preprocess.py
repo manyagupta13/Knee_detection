@@ -183,3 +183,94 @@ def test_train_and_test_use_the_identical_function(fixture_dir):
         a = preprocess_study(uid, train_tables.series, DEFAULT_PLANE_PREFS, 4, 32, 1)
         b = preprocess_study(uid, test_tables.series, DEFAULT_PLANE_PREFS, 4, 32, 1)
         assert np.array_equal(a.pixels, b.pixels)
+
+
+# ---------------------------------------------------------------------------
+# 2.5D input and laterality canonicalization
+# ---------------------------------------------------------------------------
+def test_25d_stacks_adjacent_slices_not_copies():
+    """Replicating one slice into 3 channels wastes two thirds of the input;
+    adjacent slices give through-plane context at identical FLOPs."""
+    from preprocess import to_model_input
+
+    vol = np.arange(5 * 2 * 2, dtype=np.uint8).reshape(5, 2, 2)
+    out = to_model_input(vol, "2.5d")
+    assert out.shape == (5, 3, 2, 2)
+    # middle slice's channels are (i-1, i, i+1)
+    assert np.allclose(out[2, 0], vol[1] / 255.0)
+    assert np.allclose(out[2, 1], vol[2] / 255.0)
+    assert np.allclose(out[2, 2], vol[3] / 255.0)
+
+
+def test_25d_clamps_at_the_edges():
+    """Edges must repeat a neighbour, not wrap to the far end of the knee."""
+    from preprocess import to_model_input
+
+    vol = np.arange(4 * 2 * 2, dtype=np.uint8).reshape(4, 2, 2)
+    out = to_model_input(vol, "2.5d")
+    assert np.allclose(out[0, 0], vol[0] / 255.0)   # first: prev clamps to self
+    assert np.allclose(out[-1, 2], vol[-1] / 255.0)  # last: next clamps to self
+
+
+def test_grey_mode_is_the_phase0_behaviour():
+    from preprocess import to_model_input
+
+    vol = np.arange(3 * 2 * 2, dtype=np.uint8).reshape(3, 2, 2)
+    out = to_model_input(vol, "grey")
+    assert np.array_equal(out[:, 0], out[:, 1]) and np.array_equal(out[:, 1], out[:, 2])
+
+
+def test_single_slice_falls_back_to_replication():
+    from preprocess import to_model_input
+
+    out = to_model_input(np.ones((1, 2, 2), dtype=np.uint8), "2.5d")
+    assert out.shape == (1, 3, 2, 2)
+
+
+@pytest.mark.parametrize(
+    "plane,expect",
+    [("sagittal", "slices"), ("coronal", "columns"), ("axial", "columns")],
+)
+def test_canonicalization_axis_depends_on_plane(plane, expect):
+    """The medial/lateral axis is the SLICE axis sagittally but IN-PLANE
+    coronally/axially. Using one rule for both mirrors the wrong direction."""
+    from preprocess import canonicalize_laterality
+
+    vol = np.arange(3 * 2 * 4, dtype=np.uint8).reshape(3, 2, 4)
+    out = canonicalize_laterality(vol, plane, "L")
+    if expect == "slices":
+        assert np.array_equal(out, vol[::-1])
+    else:
+        assert np.array_equal(out, vol[:, :, ::-1])
+
+
+def test_canonicalization_is_a_noop_when_side_unknown():
+    """Strictly safe: worst case we do nothing, never something wrong."""
+    from preprocess import canonicalize_laterality
+
+    vol = np.arange(12, dtype=np.uint8).reshape(3, 2, 2)
+    assert np.array_equal(canonicalize_laterality(vol, "sagittal", None), vol)
+    assert np.array_equal(canonicalize_laterality(vol, "sagittal", "R"), vol)
+    assert np.array_equal(canonicalize_laterality(vol, "unknown", "L"), vol)
+
+
+def test_detect_laterality_reads_the_explicit_tags():
+    from types import SimpleNamespace
+
+    from preprocess import detect_laterality
+
+    assert detect_laterality(SimpleNamespace(ImageLaterality="L")) == "L"
+    assert detect_laterality(SimpleNamespace(Laterality="RIGHT")) == "R"
+    assert detect_laterality(SimpleNamespace(BodyPartExamined="LEFT KNEE")) == "L"
+    assert detect_laterality(SimpleNamespace()) is None
+
+
+def test_detect_laterality_falls_back_to_position_sign():
+    from types import SimpleNamespace
+
+    from preprocess import detect_laterality
+
+    assert detect_laterality(SimpleNamespace(ImagePositionPatient=[60.0, 0, 0])) == "L"
+    assert detect_laterality(SimpleNamespace(ImagePositionPatient=[-60.0, 0, 0])) == "R"
+    # too close to midline to call
+    assert detect_laterality(SimpleNamespace(ImagePositionPatient=[3.0, 0, 0])) is None

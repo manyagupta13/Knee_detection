@@ -35,6 +35,7 @@ class StudyDataset(Dataset):
         augment: AugmentConfig | None = None,
         seed: int = 0,
         cache: StudyCache | None = None,
+        input_mode: str = "2.5d",
     ):
         self.study_uids = [str(u) for u in study_uids]
         self.series_df = series_df
@@ -46,6 +47,7 @@ class StudyDataset(Dataset):
         # Read-through decode cache. Augmentation runs AFTER this, on the uint8
         # volume, so caching cannot reduce augmentation diversity.
         self.cache = cache
+        self.input_mode = input_mode
 
     def __len__(self) -> int:
         return len(self.study_uids)
@@ -60,6 +62,7 @@ class StudyDataset(Dataset):
             self.config.n_slices,
             self.config.size,
             self.config.max_series,
+            canonicalize=self.config.canonicalize,
         )
         assert out.pixels.ndim == 4, "preprocess_study must return the stacked form"
         return out
@@ -76,7 +79,7 @@ class StudyDataset(Dataset):
             pixels = augment_study(pixels, rng, self.augment)
 
         x = torch.from_numpy(
-            np.stack([to_model_input(pixels[s]) for s in range(pixels.shape[0])])
+            np.stack([to_model_input(pixels[s], self.input_mode) for s in range(pixels.shape[0])])
         )  # (S, T, 3, H, W)
         series_mask = torch.from_numpy(study.series_mask.astype(np.float32))
         plane_ids = torch.tensor(

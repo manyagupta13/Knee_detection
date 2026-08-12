@@ -96,6 +96,9 @@ def train(
     pseudo_labels: pd.DataFrame | None = None,
     fold: int | None = None,
     n_folds: int = 5,
+    grad_checkpointing: bool = False,
+    accum_steps: int = 1,
+    input_mode: str = "2.5d",
 ) -> dict:
     t0 = time.time()
     torch.manual_seed(seed)
@@ -206,9 +209,10 @@ def train(
     aug_cfg = AugmentConfig(enabled=augment)
     train_ds = StudyDataset(
         train_uids, tables.series, pre, targets, mask,
-        augment=aug_cfg, seed=seed, cache=study_cache,
+        augment=aug_cfg, seed=seed, cache=study_cache, input_mode=input_mode,
     )
-    val_ds = StudyDataset(val_uids, tables.series, pre, targets, mask, cache=study_cache)
+    val_ds = StudyDataset(val_uids, tables.series, pre, targets, mask, cache=study_cache,
+                          input_mode=input_mode)
     train_loader = DataLoader(
         train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
     )
@@ -217,10 +221,13 @@ def train(
     )
 
     model = build_model(backbone=backbone, pretrained=pretrained).to(device)
+    if grad_checkpointing:
+        ok = model.set_grad_checkpointing(True)
+        print(f"gradient checkpointing: {'on' if ok else 'UNSUPPORTED for ' + backbone}")
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
     use_amp = bool(amp and device == "cuda")
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
-    steps = max(1, len(train_loader)) * max(1, epochs)
+    steps = max(1, -(-len(train_loader) // max(1, accum_steps))) * max(1, epochs)
     sched = torch.optim.lr_scheduler.OneCycleLR(
         opt, max_lr=lr, total_steps=steps, pct_start=0.25
     )
@@ -228,8 +235,8 @@ def train(
     def run_epoch(loader, optimizer, scheduler, tag):
         model.train()
         losses = []
-        for batch in loader:
-            optimizer.zero_grad(set_to_none=True)
+        optimizer.zero_grad(set_to_none=True)
+        for i, batch in enumerate(loader):
             with torch.autocast("cuda", enabled=use_amp):
                 logits = model(
                     batch["x"].to(device),
@@ -239,11 +246,15 @@ def train(
                 loss = masked_bce_with_logits(
                     logits, batch["y"].to(device), batch["mask"].to(device)
                 )
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            if scheduler is not None:
-                scheduler.step()
+            # Accumulate so a small per-step batch still yields a stable
+            # gradient when memory forces batch_size down.
+            scaler.scale(loss / accum_steps).backward()
+            if (i + 1) % accum_steps == 0 or (i + 1) == len(loader):
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad(set_to_none=True)
+                if scheduler is not None:
+                    scheduler.step()
             losses.append(float(loss.detach()))
         return float(np.mean(losses)) if losses else float("nan")
 
@@ -268,7 +279,7 @@ def train(
                     gold_only_mask[col] = np.where(is_gold, 1.0, 0.0)
             ft_ds = StudyDataset(
                 ft_uids, tables.series, pre, targets, gold_only_mask,
-                augment=aug_cfg, seed=seed + 1, cache=study_cache,
+                augment=aug_cfg, seed=seed + 1, cache=study_cache, input_mode=input_mode,
             )
             ft_loader = DataLoader(
                 ft_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
@@ -304,6 +315,7 @@ def train(
         print(f"gold macro-AUC (n={len(val_uids)} studies, treat as noise): {macro_auc:.4f}")
 
     run_cfg = RunConfig(preprocess=pre, backbone=backbone, target_columns=columns)
+    run_cfg.input_mode = input_mode
     run_cfg.save(out_dir / "run_config.json")
     suffix = "" if fold is None else f"_fold{fold}"
     torch.save(model.state_dict(), out_dir / f"model{suffix}.pt")

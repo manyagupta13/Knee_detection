@@ -89,3 +89,20 @@ def test_parallel_build_matches_serial(tables, tmp_path):
                            tmp_path / "p", num_workers=2, verbose=False)
     for uid in tables.study_uids[:4]:
         assert np.array_equal(serial.load(uid).pixels, parallel.load(uid).pixels), uid
+
+
+def test_canonicalize_is_part_of_the_cache_key():
+    """canonicalize changes the PIXELS, so serving a cached tensor built with
+    the other setting would be silent corruption."""
+    from dataclasses import replace
+
+    assert cache_key(replace(CFG, canonicalize=False)) != cache_key(CFG)
+
+
+def test_laterality_survives_a_cache_round_trip(tables, tmp_path):
+    cache = StudyCache(tmp_path, CFG)
+    uid = tables.study_uids[0]
+    fresh = cache.get(uid, tables.series)
+    restored = cache.load(uid)
+    assert restored.laterality == fresh.laterality
+    assert restored.planes == fresh.planes
