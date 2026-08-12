@@ -94,6 +94,8 @@ def train(
     cache_dir: str | Path | None = None,
     cache_workers: int = 4,
     pseudo_labels: pd.DataFrame | None = None,
+    fold: int | None = None,
+    n_folds: int = 5,
 ) -> dict:
     t0 = time.time()
     torch.manual_seed(seed)
@@ -163,8 +165,16 @@ def train(
     rng = np.random.default_rng(seed)
     gold_shuffled = list(gold_uids)
     rng.shuffle(gold_shuffled)
-    n_val = max(1, int(round(len(gold_shuffled) * val_fraction))) if gold_shuffled else 0
-    val_uids = gold_shuffled[:n_val]
+    if fold is not None and gold_shuffled:
+        # K-fold over gold. Every gold study is validated exactly once across
+        # folds, so out-of-fold AUC spans all 58 rather than a single slice of
+        # 17 - the difference between a usable signal and noise.
+        blocks = np.array_split(np.arange(len(gold_shuffled)), n_folds)
+        val_idx = set(blocks[fold % n_folds].tolist())
+        val_uids = [u for i, u in enumerate(gold_shuffled) if i in val_idx]
+    else:
+        n_val = max(1, int(round(len(gold_shuffled) * val_fraction))) if gold_shuffled else 0
+        val_uids = gold_shuffled[:n_val]
     train_uids = [u for u in tables.study_uids if u not in set(val_uids)]
     # Keep only studies that actually carry at least one label.
     train_uids = [u for u in train_uids if bool((mask.loc[u] > 0).any())]
@@ -295,7 +305,8 @@ def train(
 
     run_cfg = RunConfig(preprocess=pre, backbone=backbone, target_columns=columns)
     run_cfg.save(out_dir / "run_config.json")
-    torch.save(model.state_dict(), out_dir / "model.pt")
+    suffix = "" if fold is None else f"_fold{fold}"
+    torch.save(model.state_dict(), out_dir / f"model{suffix}.pt")
     metrics = {
         "history": history,
         "gold_macro_auc": macro_auc,
@@ -305,7 +316,13 @@ def train(
         "labeled_cells": n_labeled,
         "seconds": round(time.time() - t0, 1),
     }
-    (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    metrics["fold"] = fold
+    if val_uids:
+        metrics["val_uids"] = list(uids)
+        metrics["val_probs"] = probs.tolist()
+    (out_dir / f"metrics{suffix}.json").write_text(
+        json.dumps(metrics, indent=2), encoding="utf-8"
+    )
     print(f"saved weights + run_config.json to {out_dir} in {metrics['seconds']}s")
     return metrics
 
