@@ -144,6 +144,15 @@ class PreprocessConfig:
     # finding once instead of twice. Changes the pixels, so it MUST be part of
     # the cache key - hence it lives here, not as a loose function argument.
     canonicalize: bool = True
+    # Slices DECODED and cached per series. When larger than n_slices, training
+    # samples a jittered window out of this pool so the same slices are not
+    # skipped every epoch, and TTA samples several deterministic windows.
+    # Defaults to n_slices, i.e. the old fixed-linspace behaviour.
+    n_slices_pool: int | None = None
+
+    @property
+    def pool_slices(self) -> int:
+        return int(self.n_slices_pool or self.n_slices)
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -168,6 +177,7 @@ class PreprocessConfig:
             plane_prefs=tuple(d["plane_prefs"]),
             clip_percentiles=tuple(float(x) for x in d["clip_percentiles"]),
             canonicalize=bool(d.get("canonicalize", True)),
+            n_slices_pool=d.get("n_slices_pool"),
         )
 
 

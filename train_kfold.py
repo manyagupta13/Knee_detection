@@ -116,6 +116,8 @@ def main() -> None:
     ap.add_argument("--cache-dir", default=None)
     ap.add_argument("--num-workers", type=int, default=2)
     ap.add_argument("--finetune-gold-epochs", type=int, default=2)
+    ap.add_argument("--slice-jitter", type=float, default=0.5)
+    ap.add_argument("--n-slices-pool", type=int, default=None)
     ap.add_argument("--no-pretrained", action="store_true")
     args = ap.parse_args()
 
@@ -134,6 +136,8 @@ def main() -> None:
         cache_dir=args.cache_dir,
         num_workers=args.num_workers,
         finetune_gold_epochs=args.finetune_gold_epochs,
+        slice_jitter=args.slice_jitter,
+        n_slices_pool=args.n_slices_pool,
     )
 
 

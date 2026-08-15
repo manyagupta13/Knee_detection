@@ -274,3 +274,52 @@ def test_detect_laterality_falls_back_to_position_sign():
     assert detect_laterality(SimpleNamespace(ImagePositionPatient=[-60.0, 0, 0])) == "R"
     # too close to midline to call
     assert detect_laterality(SimpleNamespace(ImagePositionPatient=[3.0, 0, 0])) is None
+
+
+# ---------------------------------------------------------------------------
+# Jittered / offset slice windows
+# ---------------------------------------------------------------------------
+def test_slice_indices_defaults_to_plain_linspace():
+    from preprocess import slice_indices
+
+    got = slice_indices(10, 5)
+    assert list(got) == [0, 2, 4, 7, 9]   # linspace(0,9,5) rounded
+    assert list(slice_indices(10, 5)) == list(got), "must be reproducible"
+    assert list(slice_indices(8, 8)) == list(range(8)), "pool == n is identity"
+
+
+def test_jitter_covers_slices_fixed_sampling_never_sees():
+    """The defect: at 32 of 42 slices, fixed linspace skips the SAME 10 every
+    epoch. Jitter must reach them across epochs."""
+    from preprocess import slice_indices
+
+    fixed = set(slice_indices(42, 32).tolist())
+    assert len(fixed) < 42
+
+    seen = set()
+    for epoch in range(8):
+        seen |= set(
+            slice_indices(42, 32, jitter=0.5,
+                          rng=np.random.default_rng(epoch)).tolist()
+        )
+    assert len(seen) > len(fixed)
+
+
+def test_offset_shifts_the_window_deterministically():
+    from preprocess import slice_indices
+
+    a = slice_indices(40, 10, offset_frac=0.0)
+    b = slice_indices(40, 10, offset_frac=0.5)
+    assert not np.array_equal(a, b)
+    assert np.array_equal(b, slice_indices(40, 10, offset_frac=0.5)), "TTA must repeat"
+
+
+def test_indices_stay_in_bounds_under_extreme_settings():
+    from preprocess import slice_indices
+
+    for pool in (1, 2, 5, 40):
+        for off in (-2.0, 0.0, 2.0):
+            idx = slice_indices(pool, 16, offset_frac=off, jitter=1.0,
+                                rng=np.random.default_rng(0))
+            assert idx.min() >= 0 and idx.max() <= pool - 1, (pool, off)
+            assert len(idx) == 16

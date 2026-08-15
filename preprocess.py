@@ -370,6 +370,41 @@ def _sample_indices(n_available: int, n_slices: int) -> list[int]:
     return [int(round(i)) for i in np.linspace(0, n_available - 1, n_slices)]
 
 
+def slice_indices(
+    pool_len: int,
+    n_slices: int,
+    offset_frac: float = 0.0,
+    jitter: float = 0.0,
+    rng: np.random.Generator | None = None,
+) -> np.ndarray:
+    """Pick ``n_slices`` positions out of a cached pool of ``pool_len``.
+
+    Fixed linspace sampling means the SAME slices are skipped every epoch: at 32
+    of a 42-slice series the model never sees the other 10, all run long. This
+    picks a window that can be shifted and jittered instead, so across epochs
+    the whole series is seen in aggregate at no extra compute.
+
+    ``offset_frac`` shifts every position by a fraction of the inter-slice
+    spacing - deterministic, which is what test-time augmentation uses.
+    ``jitter`` adds independent random noise per position, for training.
+    Both collapse to plain linspace at 0.0, so evaluation stays reproducible.
+    """
+    if pool_len <= 0:
+        return np.zeros(n_slices, dtype=int)
+    if pool_len == 1:
+        return np.zeros(n_slices, dtype=int)
+
+    base = np.linspace(0.0, pool_len - 1.0, n_slices)
+    spacing = (pool_len - 1.0) / max(n_slices - 1, 1)
+
+    if offset_frac:
+        base = base + offset_frac * spacing
+    if jitter and rng is not None:
+        base = base + rng.uniform(-jitter, jitter, size=n_slices) * spacing
+
+    return np.clip(np.round(base), 0, pool_len - 1).astype(int)
+
+
 def _to_uint8(volume: np.ndarray, clip_percentiles: tuple[float, float]) -> np.ndarray:
     """Percentile-clip and scale over the WHOLE series, never per slice.
 

@@ -74,7 +74,7 @@ class StudyCache:
             return None  # a truncated file must not kill the run
         expected = (
             self.config.max_series,
-            self.config.n_slices,
+            self.config.pool_slices,
             self.config.size,
             self.config.size,
         )
@@ -114,7 +114,7 @@ class StudyCache:
             study_uid,
             series_df,
             self.config.plane_prefs,
-            self.config.n_slices,
+            self.config.pool_slices,
             self.config.size,
             self.config.max_series,
             canonicalize=self.config.canonicalize,
@@ -187,7 +187,7 @@ def _decode_one(uid: str, study_series: pd.DataFrame, config: PreprocessConfig):
         uid,
         study_series,
         config.plane_prefs,
-        config.n_slices,
+        config.pool_slices,
         config.size,
         config.max_series,
         canonicalize=config.canonicalize,

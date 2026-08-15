@@ -106,3 +106,19 @@ def test_laterality_survives_a_cache_round_trip(tables, tmp_path):
     restored = cache.load(uid)
     assert restored.laterality == fresh.laterality
     assert restored.planes == fresh.planes
+
+
+def test_pool_size_is_part_of_the_cache_key():
+    """The pool changes how many slices are decoded, so it must key the cache."""
+    from dataclasses import replace
+
+    assert cache_key(replace(CFG, n_slices_pool=48)) != cache_key(CFG)
+
+
+def test_cache_stores_the_pool_not_n_slices(tables, tmp_path):
+    from dataclasses import replace
+
+    pooled = replace(CFG, n_slices_pool=8)   # n_slices=4, pool=8
+    cache = StudyCache(tmp_path, pooled)
+    got = cache.get(tables.study_uids[0], tables.series)
+    assert got.pixels.shape[1] == 8, "cache must hold the pool, dataset subsamples"

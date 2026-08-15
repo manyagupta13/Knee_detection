@@ -53,6 +53,28 @@ def per_column_auc(
 
 
 @torch.no_grad()
+def predict_tta(model, dataset_factory, device, offsets=(0.0,), batch_size=4,
+                num_workers=0) -> tuple[np.ndarray, list[str]]:
+    """Average predictions over several deterministic slice windows.
+
+    Each offset shifts the sampled window by a fraction of the inter-slice
+    spacing, so every pass sees somewhat different tissue. Cheap - the test set
+    is ~1,300 studies - and averaging over windows reduces the variance from
+    which particular slices happened to be sampled.
+    """
+    from torch.utils.data import DataLoader
+
+    acc, uids = None, None
+    for off in offsets:
+        loader = DataLoader(dataset_factory(off), batch_size=batch_size,
+                            shuffle=False, num_workers=num_workers)
+        probs, u = predict(model, loader, device)
+        acc = probs if acc is None else acc + probs
+        uids = u
+    return acc / len(offsets), uids
+
+
+@torch.no_grad()
 def predict(model, loader, device) -> tuple[np.ndarray, list[str]]:
     model.eval()
     probs, uids = [], []
@@ -97,6 +119,10 @@ def train(
     fold: int | None = None,
     n_folds: int = 5,
     grad_checkpointing: bool = False,
+    slice_jitter: float = 0.5,
+    n_slices_pool: int | None = None,
+    tta_offsets: tuple[float, ...] = (0.0,),
+    finetune_freeze_backbone: bool = True,
     accum_steps: int = 1,
     input_mode: str = "2.5d",
 ) -> dict:
@@ -187,8 +213,12 @@ def train(
         config.MULTI_PLANE_PREFS if max_series > 1 else config.DEFAULT_PLANE_PREFS
     )
     pre = PreprocessConfig(
-        n_slices=n_slices, size=size, max_series=max_series, plane_prefs=prefs
+        n_slices=n_slices, size=size, max_series=max_series, plane_prefs=prefs,
+        n_slices_pool=n_slices_pool,
     )
+    if pre.pool_slices > n_slices:
+        print(f"slice pool: caching {pre.pool_slices}, sampling {n_slices} "
+              f"(jitter={slice_jitter})")
     print(f"plane prefs: {prefs} | max_series={max_series}")
 
     # Cheap, decode-free sanity check: if this ratio is low, series selection
@@ -210,6 +240,7 @@ def train(
     train_ds = StudyDataset(
         train_uids, tables.series, pre, targets, mask,
         augment=aug_cfg, seed=seed, cache=study_cache, input_mode=input_mode,
+        slice_jitter=slice_jitter,
     )
     val_ds = StudyDataset(val_uids, tables.series, pre, targets, mask, cache=study_cache,
                           input_mode=input_mode)
@@ -284,17 +315,39 @@ def train(
             ft_loader = DataLoader(
                 ft_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers
             )
-            ft_opt = torch.optim.AdamW(model.parameters(), lr=finetune_lr, weight_decay=1e-4)
+            # MEASURED: fine-tuning everything on 41 gold studies dropped ACL
+            # from 0.871 to 0.729 - far too few examples to move a whole
+            # backbone without distorting it. Freezing the encoder lets gold
+            # correct the pooling and heads only, which is all 41 studies can
+            # reasonably support.
+            if finetune_freeze_backbone:
+                for prm in model.backbone.parameters():
+                    prm.requires_grad_(False)
+                print("  fine-tune: backbone FROZEN, training pool + heads only")
+            ft_params = [prm for prm in model.parameters() if prm.requires_grad]
+            ft_opt = torch.optim.AdamW(ft_params, lr=finetune_lr, weight_decay=1e-4)
             for e in range(finetune_gold_epochs):
                 fl = run_epoch(ft_loader, ft_opt, None, "gold")
                 history.append({"epoch": f"ft{e}", "train_loss": fl})
                 print(f"finetune {e}: masked BCE {fl:.4f}")
+            if finetune_freeze_backbone:
+                for prm in model.backbone.parameters():
+                    prm.requires_grad_(True)
 
     # ---- gold-only validation ----------------------------------------------
     auc_table = pd.DataFrame(columns=["column", "n", "auc"])
     macro_auc = float("nan")
     if val_uids:
-        probs, uids = predict(model, val_loader, device)
+        if len(tta_offsets) > 1:
+            def _val_ds(off):
+                return StudyDataset(val_uids, tables.series, pre, targets, mask,
+                                    cache=study_cache, input_mode=input_mode,
+                                    slice_offset=off)
+            probs, uids = predict_tta(model, _val_ds, device, offsets=tta_offsets,
+                                      batch_size=batch_size, num_workers=num_workers)
+            print(f"validated with {len(tta_offsets)}-window TTA")
+        else:
+            probs, uids = predict(model, val_loader, device)
         pred_std = float(probs.std())
         print(f"val prediction std across studies/columns: {pred_std:.5f}")
         if pred_std < 1e-3:
